@@ -4,6 +4,8 @@ CLI tool for identifying synthesizers and eurorack modules from photos and listi
 
 Takes photos of your gear, identifies it using Claude Vision, cross-references with ModularGrid for eurorack modules, checks Reverb for market pricing, and publishes listings — all from the command line.
 
+![synthshop identify demo](docs/demo.png)
+
 ## Features
 
 - **Photo identification** — Claude Vision identifies make, model, condition, and generates listing descriptions
