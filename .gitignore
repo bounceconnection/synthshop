@@ -24,6 +24,8 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+.Trash/
+.Trashes/
 
 # Testing
 .coverage
