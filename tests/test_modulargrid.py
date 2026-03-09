@@ -42,6 +42,9 @@ CHAINSAW_FULL_HTML = """
 <body>
 <div class="box-specs"><dl><dt>Dimensions</dt><dd>4 HP</dd></dl></div>
 <p class="text-error">This Module is discontinued.</p>
+<a href="/img/modcache/22227.f.jpg" data-lightbox="module22227" title="Chainsaw" class="centered-module">
+  <img src="/img/imagecache/66x413_22227.jpg" alt="Chainsaw">
+</a>
 """ + CHAINSAW_MODULE_DETAILS + """
 </body>
 </html>
@@ -186,6 +189,7 @@ class TestFetchModulePage:
         assert result["hp"] == 4
         assert result["discontinued"] is True
         assert result["subtitle"] == "Digital Super-Oscillator"
+        assert result["image_url"] == "https://modulargrid.net/img/modcache/22227.f.jpg"
 
     @patch("synthshop.integrations.modulargrid.httpx.get")
     def test_returns_description(self, mock_get):
@@ -242,6 +246,7 @@ class TestFetchModulePage:
         assert result is not None
         assert result["description"] is None
         assert result["features"] == []
+        assert result["image_url"] is None
 
     @patch("synthshop.integrations.modulargrid.httpx.get")
     def test_subtitle_from_lead_tag_when_og_truncated(self, mock_get):
@@ -290,6 +295,7 @@ class TestSearchModularGrid:
             "subtitle": "Digital Super-Oscillator",
             "description": "Chainsaw is a powerful digital oscillator.",
             "features": ["3 voices", "Stereo output"],
+            "image_url": "https://modulargrid.net/img/modcache/22227.f.jpg",
             "url": "https://modulargrid.net/e/acid-rain-technology-chainsaw",
         }
 
@@ -314,6 +320,7 @@ class TestSearchModularGrid:
              "full_title": "Acid Rain Technology Chainsaw", "hp": 4,
              "discontinued": True, "subtitle": "Digital Super-Oscillator",
              "description": "A powerful oscillator.", "features": ["Stereo"],
+             "image_url": "https://modulargrid.net/img/modcache/22227.f.jpg",
              "url": "https://modulargrid.net/e/acid-rain-technology-chainsaw"},
         ]
         mock_ddg.return_value = "acid-rain-technology-chainsaw"
@@ -342,6 +349,7 @@ class TestSearchModularGrid:
             "full_title": "Make Noise DPO", "hp": 28,
             "discontinued": False, "subtitle": "Dual Prismatic Oscillator",
             "description": "A complex oscillator.", "features": [],
+            "image_url": "https://modulargrid.net/img/modcache/12345.f.jpg",
             "url": "https://modulargrid.net/e/make-noise-dpo",
         }
         progress_messages = []
@@ -376,6 +384,7 @@ class TestTryCommonManufacturers:
             "subtitle": "Digital Super-Oscillator",
             "description": "A powerful digital oscillator.",
             "features": ["Stereo output"],
+            "image_url": "https://modulargrid.net/img/modcache/22227.f.jpg",
             "url": "https://modulargrid.net/e/acid-rain-technology-chainsaw",
         }
 

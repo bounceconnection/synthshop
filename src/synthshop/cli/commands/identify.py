@@ -1,13 +1,17 @@
 """synthshop identify — Identify a synth from photos using Claude Vision."""
 
+from io import BytesIO
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 import typer
+from PIL import Image
 from rich.console import Console
 from rich.panel import Panel
 from rich.status import Status
 from rich.table import Table
+from rich.text import Text
 
 from synthshop.integrations.claude_vision import SynthIdentification, identify_from_photos
 from synthshop.integrations.modulargrid import search_modulargrid
@@ -122,6 +126,10 @@ def _verify_with_modulargrid(result: SynthIdentification) -> SynthIdentification
             f"[green]ModularGrid confirmed: {mg_manufacturer} {mg_model}[/green]\n"
         )
 
+    # Show the module panel image from ModularGrid
+    if mg.get("image_url"):
+        _display_module_image(mg["image_url"])
+
     # Replace Claude's description with ModularGrid's authoritative one
     if mg.get("description"):
         result.description = mg["description"]
@@ -153,6 +161,60 @@ def _verify_with_modulargrid(result: SynthIdentification) -> SynthIdentification
         result.notes = f"Discontinued. {result.notes}".strip()
 
     return result
+
+
+def _display_module_image(image_url: str, max_height: int = 400) -> None:
+    """Download and render a ModularGrid panel image in the terminal.
+
+    Uses the Kitty graphics protocol (supported by Ghostty, Kitty, WezTerm)
+    for full-resolution inline images.
+    """
+    try:
+        r = httpx.get(image_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+        img = Image.open(BytesIO(r.content)).convert("RGB")
+    except Exception:
+        return  # Silently skip if image can't be loaded
+
+    # Scale down to reasonable terminal size, preserving aspect ratio
+    if img.height > max_height:
+        aspect = img.width / img.height
+        img = img.resize((int(max_height * aspect), max_height), Image.LANCZOS)
+
+    _kitty_display(img)
+
+
+def _kitty_display(img: Image.Image) -> None:
+    """Display an image using the Kitty graphics protocol.
+
+    Sends raw PNG data via the escape sequence:
+    ESC_gs f=100,a=T,... ; <base64 data> ESC backslash
+
+    Works in Ghostty, Kitty, WezTerm, and other terminals supporting
+    the Kitty graphics protocol.
+    """
+    import base64
+    import sys
+
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    data = base64.standard_b64encode(buf.getvalue())
+
+    # Kitty protocol sends data in 4096-byte chunks
+    CHUNK = 4096
+    chunks = [data[i:i + CHUNK] for i in range(0, len(data), CHUNK)]
+
+    for i, chunk in enumerate(chunks):
+        is_last = i == len(chunks) - 1
+        if i == 0:
+            # First chunk: include metadata
+            header = f"\033_Ga=T,f=100,m={'0' if is_last else '1'};"
+        else:
+            header = f"\033_Gm={'0' if is_last else '1'};"
+        sys.stdout.write(header + chunk.decode("ascii") + "\033\\")
+
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    console.print()
 
 
 def _check_reverb_pricing(result: SynthIdentification) -> SynthIdentification:

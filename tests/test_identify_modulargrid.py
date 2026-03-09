@@ -91,6 +91,7 @@ def modulargrid_chainsaw():
             "Remembers previous tuning on power cycle, long encoder press to return to C1 (32.7Hz)",
             "Compact, but playable 4hp width",
         ],
+        "image_url": "https://modulargrid.net/img/modcache/22227.f.jpg",
         "url": "https://modulargrid.net/e/acid-rain-technology-chainsaw",
     }
 
@@ -107,6 +108,7 @@ def modulargrid_dpo():
         "subtitle": "Dual Prismatic Oscillator",
         "description": "The DPO is a complex analog oscillator by Make Noise.",
         "features": ["Analog VCOs", "Through-zero FM", "Waveshaping"],
+        "image_url": "https://modulargrid.net/img/modcache/12345.f.jpg",
         "url": "https://modulargrid.net/e/make-noise-dpo",
     }
 
@@ -277,6 +279,7 @@ class TestVerifyWithModularGrid:
             "subtitle": 'A "cosmic" oscillator',
             "description": "The LANIAKEA concept comes from the idea of exploring all possible sound textures.",
             "features": [],  # No feature list on ModularGrid
+            "image_url": "https://modulargrid.net/img/modcache/99999.f.jpg",
             "url": "https://modulargrid.net/e/magerit-laniakea",
         }
         mock_search.return_value = mg_data
@@ -297,6 +300,7 @@ class TestVerifyWithModularGrid:
             "subtitle": "Digital Super-Oscillator",
             "description": None,
             "features": [],
+            "image_url": None,
             "url": "https://modulargrid.net/e/acid-rain-technology-chainsaw",
         }
         mock_search.return_value = mg_data
@@ -318,6 +322,51 @@ class TestVerifyWithModularGrid:
 
         assert "Discontinued" not in result.notes
         assert "Discontinued" not in result.features
+
+    @patch("synthshop.cli.commands.identify._display_module_image")
+    @patch("synthshop.cli.commands.identify.search_modulargrid")
+    def test_displays_module_image_when_available(
+        self, mock_search, mock_display_image, claude_chainsaw_wrong, modulargrid_chainsaw,
+    ):
+        """When ModularGrid returns an image_url, display it in the terminal."""
+        mock_search.return_value = modulargrid_chainsaw
+
+        _verify_with_modulargrid(claude_chainsaw_wrong)
+
+        mock_display_image.assert_called_once_with(modulargrid_chainsaw["image_url"])
+
+    @patch("synthshop.cli.commands.identify._display_module_image")
+    @patch("synthshop.cli.commands.identify.search_modulargrid")
+    def test_skips_image_when_not_available(self, mock_search, mock_display_image):
+        """When ModularGrid has no image_url, don't attempt to display."""
+        claude = SynthIdentification(
+            make="SomeMaker",
+            model="Widget",
+            category="synthesizers",
+            description="A widget.",
+            features=["Feature"],
+            condition="Good",
+            price_low=100.0,
+            price_high=200.0,
+            confidence="medium",
+        )
+        mg_data = {
+            "manufacturer": "SomeMaker",
+            "model": "Widget",
+            "full_title": "SomeMaker Widget",
+            "hp": 8,
+            "discontinued": False,
+            "subtitle": "Filter",
+            "description": "A filter module.",
+            "features": [],
+            "image_url": None,
+            "url": "https://modulargrid.net/e/somemaker-widget",
+        }
+        mock_search.return_value = mg_data
+
+        _verify_with_modulargrid(claude)
+
+        mock_display_image.assert_not_called()
 
     @patch("synthshop.cli.commands.identify.search_modulargrid")
     def test_swapped_make_model_found(self, mock_search, modulargrid_chainsaw):
@@ -341,3 +390,94 @@ class TestVerifyWithModularGrid:
         assert result.make == "Acid Rain Technology"
         assert result.model == "Chainsaw"
         assert "powerful digital oscillator" in result.description
+
+
+class TestDisplayModuleImage:
+    """Test _display_module_image downloads and renders images."""
+
+    @patch("synthshop.cli.commands.identify._kitty_display")
+    @patch("synthshop.cli.commands.identify.httpx.get")
+    def test_downloads_and_displays_image(self, mock_get, mock_kitty):
+        from synthshop.cli.commands.identify import _display_module_image
+
+        # Create a tiny 2x2 red PNG in memory
+        from io import BytesIO
+        from PIL import Image
+
+        img = Image.new("RGB", (2, 2), color=(255, 0, 0))
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        png_bytes = buf.getvalue()
+
+        mock_response = MagicMock()
+        mock_response.content = png_bytes
+        mock_get.return_value = mock_response
+
+        _display_module_image("https://modulargrid.net/img/modcache/22227.f.jpg")
+
+        mock_get.assert_called_once()
+        mock_kitty.assert_called_once()
+        # The image passed to _kitty_display should be a PIL Image
+        displayed_img = mock_kitty.call_args[0][0]
+        assert isinstance(displayed_img, Image.Image)
+
+    @patch("synthshop.cli.commands.identify._kitty_display")
+    @patch("synthshop.cli.commands.identify.httpx.get")
+    def test_scales_down_tall_images(self, mock_get, mock_kitty):
+        from synthshop.cli.commands.identify import _display_module_image
+        from io import BytesIO
+        from PIL import Image
+
+        # Create a tall image (100x800)
+        img = Image.new("RGB", (100, 800), color=(0, 0, 255))
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+
+        mock_response = MagicMock()
+        mock_response.content = buf.getvalue()
+        mock_get.return_value = mock_response
+
+        _display_module_image("https://example.com/tall.jpg", max_height=400)
+
+        mock_kitty.assert_called_once()
+        displayed_img = mock_kitty.call_args[0][0]
+        assert displayed_img.height == 400
+
+    @patch("synthshop.cli.commands.identify._kitty_display")
+    @patch("synthshop.cli.commands.identify.httpx.get")
+    def test_silently_skips_on_download_error(self, mock_get, mock_kitty):
+        from synthshop.cli.commands.identify import _display_module_image
+
+        mock_get.side_effect = Exception("Network error")
+
+        # Should not raise
+        _display_module_image("https://example.com/broken.jpg")
+
+        mock_kitty.assert_not_called()
+
+
+class TestKittyDisplay:
+    """Test _kitty_display sends correct escape sequences."""
+
+    def test_sends_kitty_escape_sequence(self):
+        from io import BytesIO, StringIO
+        from unittest.mock import patch as _patch
+
+        from PIL import Image
+
+        from synthshop.cli.commands.identify import _kitty_display
+
+        img = Image.new("RGB", (2, 2), color=(255, 0, 0))
+
+        captured = StringIO()
+        with _patch("sys.stdout", captured):
+            _kitty_display(img)
+
+        output = captured.getvalue()
+        # Should start with Kitty graphics escape
+        assert "\033_G" in output
+        # Should contain the action and format params
+        assert "a=T" in output
+        assert "f=100" in output
+        # Should end with ST (string terminator)
+        assert "\033\\" in output

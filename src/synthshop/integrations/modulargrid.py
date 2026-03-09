@@ -320,6 +320,10 @@ def fetch_module_page(url: str) -> dict | None:
     # Extract full description and features from #module-details section
     description, features = _extract_description_and_features(html)
 
+    # Extract panel image URL
+    img_match = re.search(r'href="(/img/modcache/\d+\.f\.jpg)"', html)
+    image_url = f"https://modulargrid.net{img_match.group(1)}" if img_match else None
+
     return {
         "manufacturer": manufacturer,
         "model": model_name,
@@ -329,5 +333,6 @@ def fetch_module_page(url: str) -> dict | None:
         "subtitle": subtitle,
         "description": description,
         "features": features,
+        "image_url": image_url,
         "url": url,
     }
