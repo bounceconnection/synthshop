@@ -83,6 +83,37 @@ products/         Product JSON files (the "database")
 
 ## Tests
 
+All external APIs (Anthropic, Reverb, ModularGrid) are mocked — no API keys needed to run tests.
+
 ```bash
+# Run all tests
 pytest
+
+# Run with verbose output
+pytest -v
+
+# Run a specific test file
+pytest tests/test_modulargrid.py
+
+# Run a specific test class or method
+pytest tests/test_identify_modulargrid.py::TestVerifyWithModularGrid::test_replaces_description
+
+# Run tests matching a keyword
+pytest -k "modulargrid"
+
+# Run with coverage report
+pytest --cov=synthshop --cov-report=term-missing
 ```
+
+### Test files
+
+| File | Covers |
+|------|--------|
+| `test_claude_vision.py` | Image encoding, content blocks, API tool use |
+| `test_modulargrid.py` | HTML extraction, slug search, parallel batch lookup |
+| `test_identify_modulargrid.py` | ModularGrid correction of description, features, manufacturer |
+| `test_reverb.py` | Reverb API client, rate limiting, listing CRUD, image upload |
+| `test_cli.py` | CLI commands (identify, publish, list, unpublish, sold) |
+| `test_models.py` | Pydantic models and validation |
+| `test_product_store.py` | JSON product CRUD |
+| `test_config.py` | Settings and env var loading |
