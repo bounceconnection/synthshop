@@ -32,5 +32,8 @@ Thumbs.db
 htmlcov/
 .pytest_cache/
 
+# Claude Code
+.claude/settings.local.json
+
 # Project-specific
 # Don't ignore products/ — that's our "database"
