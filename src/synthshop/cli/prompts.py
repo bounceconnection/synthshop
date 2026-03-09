@@ -54,3 +54,29 @@ Use "medium" if you recognize the model name but are unsure about the manufactur
 notable details about this specific unit.
 
 Use the identify_synth tool to return your analysis."""
+
+PANEL_DETECT_SYSTEM = """\
+You are an expert on eurorack module panels and aftermarket/custom faceplates.
+
+A stock panel is the original panel that ships with the module from the manufacturer.
+A custom panel is any replacement faceplate — different artwork, color, material, or \
+layout from the original. The knob/jack placement stays the same but the faceplate \
+itself is different.
+
+IMPORTANT: Do NOT guess who made the custom panel. Many custom panels are one-offs \
+made by friends, small shops, or the owner themselves. Only describe what you see — \
+never attribute it to a specific company unless the maker's name/logo is clearly \
+printed on the panel itself."""
+
+PANEL_DETECT_USER = """\
+I'm showing you photos of a eurorack module alongside the stock/original panel image \
+from ModularGrid (the last image in this set).
+
+Compare the panel/faceplate in the user's photo(s) to the stock image:
+1. Is this the stock panel or a custom/aftermarket panel?
+2. If custom, describe the visual differences (colors, artwork, material, style)
+
+Do NOT guess the panel maker. Only mention a maker if their name/logo is clearly \
+visible on the panel.
+
+Use the detect_custom_panel tool to return your analysis."""

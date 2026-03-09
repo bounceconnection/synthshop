@@ -14,7 +14,11 @@ from rich.panel import Panel
 from rich.status import Status
 from rich.table import Table
 
-from synthshop.integrations.claude_vision import SynthIdentification, identify_from_photos
+from synthshop.integrations.claude_vision import (
+    SynthIdentification,
+    detect_custom_panel,
+    identify_from_photos,
+)
 from synthshop.integrations.modulargrid import search_modulargrid
 from synthshop.integrations.reverb import ReverbClient
 
@@ -62,8 +66,14 @@ def identify(
     console.print()
 
     # Cross-reference with ModularGrid for eurorack modules
+    mg_data = None
     if not no_modulargrid and result.category in EURORACK_CATEGORIES:
-        result = _verify_with_modulargrid(result)
+        mg_data = _search_modulargrid_with_fallback(result)
+        result = _verify_with_modulargrid(result, mg_data=mg_data)
+
+    # Check for custom/aftermarket panels
+    if mg_data and mg_data.get("image_url"):
+        result = _check_custom_panel(result, photos, mg_data["image_url"], model=model)
 
     # Look up real market pricing on Reverb
     result = _check_reverb_pricing(result)
@@ -72,13 +82,19 @@ def identify(
     return result
 
 
-def _verify_with_modulargrid(result: SynthIdentification) -> SynthIdentification:
+def _verify_with_modulargrid(
+    result: SynthIdentification, mg_data: dict | None = None,
+) -> SynthIdentification:
     """Search ModularGrid to verify/correct the identification.
 
     Claude Vision often misidentifies niche eurorack manufacturers, and sometimes
     swaps make/model. We try multiple search strategies to find the right module.
+
+    Args:
+        result: Claude's identification to verify/correct.
+        mg_data: Pre-fetched ModularGrid data. If None, searches automatically.
     """
-    mg = _search_modulargrid_with_fallback(result)
+    mg = mg_data if mg_data is not None else _search_modulargrid_with_fallback(result)
     if not mg:
         console.print("[dim]No ModularGrid match found. Verify manufacturer manually.[/dim]\n")
         return result
@@ -173,6 +189,44 @@ def _build_modulargrid_features(mg: dict) -> list[str]:
     if mg.get("discontinued"):
         features.append("Discontinued — increasingly rare")
     return features
+
+
+def _check_custom_panel(
+    result: SynthIdentification,
+    user_photos: list[Path],
+    stock_image_url: str,
+    *,
+    model: str = "claude-sonnet-4-20250514",
+) -> SynthIdentification:
+    """Check if the module has a custom/aftermarket panel.
+
+    Compares user photos to the ModularGrid stock panel image using Claude Vision.
+    If a custom panel is detected, searches for the panel maker and updates the result.
+    """
+    try:
+        with Status(
+            "Checking for custom panels...", console=console, spinner="dots",
+        ):
+            panel = detect_custom_panel(
+                user_photos, stock_image_url, model=model,
+            )
+    except (OSError, ValueError, RuntimeError):
+        return result
+
+    if not panel.is_custom or panel.confidence == "low":
+        return result
+
+    result.custom_panel = True
+
+    console.print(f"[yellow]Custom panel detected:[/yellow] {panel.description}")
+    console.print()
+
+    # Add to features and notes — never attribute a specific maker since
+    # we can't tell from photos alone who made a custom panel
+    result.features.append("Custom/aftermarket panel")
+    result.notes = f"Custom/aftermarket panel. {result.notes}".strip()
+
+    return result
 
 
 def _display_module_image(image_url: str, max_height: int = 400) -> None:
@@ -285,6 +339,11 @@ def _display_result(result: SynthIdentification) -> None:
     if result.variant:
         table.add_row("Variant", result.variant)
     table.add_row("Category", result.category)
+    if result.custom_panel:
+        panel_info = "Custom/aftermarket"
+        if result.custom_panel_maker:
+            panel_info += f" by {result.custom_panel_maker}"
+        table.add_row("Panel", f"[yellow]{panel_info}[/yellow]")
     table.add_row("Condition", result.condition)
     if result.condition_notes:
         table.add_row("", f"[dim]{result.condition_notes}[/dim]")

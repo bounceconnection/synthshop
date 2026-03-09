@@ -60,8 +60,9 @@ def sample_reverb_listing() -> ReverbListing:
 
 
 class TestIdentifyCommand:
+    @patch("synthshop.cli.commands.identify._search_modulargrid_with_fallback", return_value=None)
     @patch("synthshop.cli.commands.identify.identify_from_photos")
-    def test_identify_success(self, mock_identify, jpeg_image, sample_identification):
+    def test_identify_success(self, mock_identify, _mock_mg, jpeg_image, sample_identification):
         mock_identify.return_value = sample_identification
         result = runner.invoke(app, ["identify", str(jpeg_image)])
         assert result.exit_code == 0

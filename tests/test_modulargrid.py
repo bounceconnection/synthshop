@@ -7,6 +7,8 @@ import pytest
 
 from synthshop.integrations.modulargrid import (
     _extract_description_and_features,
+    _extract_module_slugs,
+    _pick_best_slug,
     _slugify,
     _try_common_manufacturers,
     fetch_module_page,
@@ -418,3 +420,68 @@ class TestTryCommonManufacturers:
         assert len(messages) >= 1
         # Should report batch ranges like "1–10/48"
         assert any("1–10" in msg for msg in messages)
+
+
+# --- _extract_module_slugs tests ---
+
+
+class TestExtractModuleSlugs:
+    def test_extracts_unique_module_slugs(self):
+        html = (
+            '<a href="https://modulargrid.net/e/mungo-enterprises-d0">d0</a>'
+            '<a href="https://modulargrid.net/e/dpw-design-zero">Zero</a>'
+            '<a href="https://modulargrid.net/e/mungo-enterprises-d0">d0 again</a>'
+        )
+        slugs = _extract_module_slugs(html)
+        assert slugs == ["mungo-enterprises-d0", "dpw-design-zero"]
+
+    def test_skips_non_module_pages(self):
+        html = (
+            '<a href="https://modulargrid.net/e/modules/browser">Browse</a>'
+            '<a href="https://modulargrid.net/e/forum/topic/123">Forum</a>'
+            '<a href="https://modulargrid.net/e/acid-rain-technology-chainsaw">Chainsaw</a>'
+        )
+        slugs = _extract_module_slugs(html)
+        assert slugs == ["acid-rain-technology-chainsaw"]
+
+    def test_returns_empty_for_no_modules(self):
+        assert _extract_module_slugs("no modulargrid links here") == []
+
+
+# --- _pick_best_slug tests ---
+
+
+class TestPickBestSlug:
+    def test_prefers_slug_with_both_make_and_model(self):
+        slugs = ["dpw-design-zero", "mungo-enterprises-d0", "other-module"]
+        result = _pick_best_slug(slugs, "d0", make_hint="Mungo Enterprises")
+        assert result == "mungo-enterprises-d0"
+
+    def test_prefers_model_match_over_make_match(self):
+        """When no slug has both, model match wins over make-only match."""
+        slugs = ["mungo-enterprises-g0", "some-maker-d0"]
+        result = _pick_best_slug(slugs, "d0", make_hint="Mungo Enterprises")
+        assert result == "some-maker-d0"
+
+    def test_falls_back_to_make_match(self):
+        """When no slug contains the model text, prefer the make match."""
+        slugs = ["dpw-design-zero", "mungo-enterprises-delay"]
+        result = _pick_best_slug(slugs, "d0", make_hint="Mungo Enterprises")
+        assert result == "mungo-enterprises-delay"
+
+    def test_returns_none_when_no_match(self):
+        """Don't blindly return first result — return None."""
+        slugs = ["dpw-design-zero", "totally-unrelated-module"]
+        result = _pick_best_slug(slugs, "d0", make_hint="Mungo Enterprises")
+        assert result is None
+
+    def test_returns_none_without_make_hint(self):
+        """Without make_hint, only model matches count."""
+        slugs = ["dpw-design-zero", "totally-unrelated-module"]
+        result = _pick_best_slug(slugs, "d0")
+        assert result is None
+
+    def test_model_match_without_make_hint(self):
+        slugs = ["acid-rain-technology-chainsaw", "make-noise-chains"]
+        result = _pick_best_slug(slugs, "chainsaw")
+        assert result == "acid-rain-technology-chainsaw"

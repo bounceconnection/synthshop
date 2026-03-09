@@ -9,7 +9,14 @@ import anthropic
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from synthshop.cli.prompts import IDENTIFY_SYSTEM, IDENTIFY_USER
+import httpx
+
+from synthshop.cli.prompts import (
+    IDENTIFY_SYSTEM,
+    IDENTIFY_USER,
+    PANEL_DETECT_SYSTEM,
+    PANEL_DETECT_USER,
+)
 from synthshop.core.config import settings
 
 # Tool schema for structured output — defines what Claude returns
@@ -116,6 +123,8 @@ class SynthIdentification(BaseModel):
     price_high: float
     confidence: str  # "high", "medium", "low"
     notes: str = ""
+    custom_panel: bool = False
+    custom_panel_maker: str | None = None
 
 
 def _encode_image(path: Path) -> tuple[str, str]:
@@ -231,3 +240,125 @@ def identify_from_photos(
         "Claude did not return an identify_synth tool call. "
         f"Response: {response.content}"
     )
+
+
+# --- Custom panel detection ---
+
+class CustomPanelResult(BaseModel):
+    """Result of custom/aftermarket panel detection."""
+
+    is_custom: bool
+    confidence: str  # "high", "medium", "low"
+    description: str = ""
+
+
+PANEL_DETECT_TOOL = {
+    "name": "detect_custom_panel",
+    "description": (
+        "Compare the user's module photo to the stock panel image and determine "
+        "if a custom/aftermarket panel is installed."
+    ),
+    "input_schema": {
+        "type": "object",
+        "required": ["is_custom", "confidence"],
+        "properties": {
+            "is_custom": {
+                "type": "boolean",
+                "description": "True if the panel differs from the stock image",
+            },
+            "confidence": {
+                "type": "string",
+                "enum": ["high", "medium", "low"],
+            },
+            "description": {
+                "type": "string",
+                "description": (
+                    "Description of the custom panel if detected "
+                    "(color, style, suspected maker)"
+                ),
+                "default": "",
+            },
+        },
+    },
+}
+
+
+def detect_custom_panel(
+    user_image_paths: list[Path],
+    stock_image_url: str,
+    *,
+    api_key: str | None = None,
+    model: str = "claude-sonnet-4-20250514",
+) -> CustomPanelResult:
+    """Compare user photos to stock panel image to detect custom panels.
+
+    Downloads the stock image from ModularGrid and sends it alongside the
+    user's photos to Claude for visual comparison.
+
+    Args:
+        user_image_paths: The user's photos of the module.
+        stock_image_url: URL of the stock panel image from ModularGrid.
+        api_key: Anthropic API key. Falls back to settings if not provided.
+        model: Claude model to use.
+
+    Returns:
+        CustomPanelResult with detection info.
+    """
+    key = api_key or settings.require_anthropic()
+    client = anthropic.Anthropic(api_key=key)
+
+    # Build content: user photos first, then stock image, then prompt
+    blocks: list[dict] = []
+    for path in user_image_paths:
+        data, media_type = _encode_image(path)
+        blocks.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": media_type, "data": data},
+        })
+
+    # Download and encode the stock panel image
+    stock_data = _download_image_as_base64(stock_image_url)
+    if stock_data:
+        blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": stock_data,
+            },
+        })
+
+    blocks.append({"type": "text", "text": PANEL_DETECT_USER})
+
+    response = client.messages.create(
+        model=model,
+        max_tokens=512,
+        system=PANEL_DETECT_SYSTEM,
+        tools=[PANEL_DETECT_TOOL],
+        tool_choice={"type": "tool", "name": "detect_custom_panel"},
+        messages=[{"role": "user", "content": blocks}],
+    )
+
+    for block in response.content:
+        if block.type == "tool_use" and block.name == "detect_custom_panel":
+            return CustomPanelResult.model_validate(block.input)
+
+    raise RuntimeError(
+        "Claude did not return a detect_custom_panel tool call. "
+        f"Response: {response.content}"
+    )
+
+
+def _download_image_as_base64(url: str) -> str | None:
+    """Download an image from a URL and return base64-encoded data."""
+    try:
+        r = httpx.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+            follow_redirects=True,
+        )
+        r.raise_for_status()
+        return base64.standard_b64encode(r.content).decode("utf-8")
+    except (OSError, httpx.HTTPError):
+        return None

@@ -52,13 +52,13 @@ def search_modulargrid(
 
     # Step 2: Try DuckDuckGo search
     _progress("Searching web...")
-    slug = _search_ddg(model_name)
+    slug = _search_ddg(model_name, make_hint=make_hint)
     if slug:
         return fetch_module_page(f"https://modulargrid.net/e/{slug}")
 
     # Step 3: Try DuckDuckGo with make + model (sometimes finds different results)
     if make_hint:
-        slug = _search_ddg(f"{make_hint} {model_name}")
+        slug = _search_ddg(f"{make_hint} {model_name}", make_hint=make_hint)
         if slug:
             return fetch_module_page(f"https://modulargrid.net/e/{slug}")
 
@@ -90,6 +90,8 @@ _COMMON_MANUFACTURERS = [
     "ritual-electronics", "neuzeit-instruments", "antimatter-audio",
     "mosaic", "blue-lantern", "frequency-central", "st-modular",
     "wmdevices", "abstract-data", "dannysound", "ladik",
+    "mungo-enterprises", "dpw-design", "hikari-instruments", "recovery-effects",
+    "nonlinearcircuits", "random-source", "frap-tools", "cosmotronic",
 ]
 
 
@@ -151,12 +153,17 @@ async def _head_check(client: httpx.AsyncClient, url: str) -> str | None:
     return None
 
 
-def _search_ddg(model_name: str) -> str | None:
-    """Search DuckDuckGo for a ModularGrid module page and return its slug."""
+def _search_ddg(search_text: str, make_hint: str | None = None) -> str | None:
+    """Search DuckDuckGo for a ModularGrid module page and return its slug.
+
+    Args:
+        search_text: Text to search for (model name, or "make model").
+        make_hint: Optional manufacturer name to prefer in results.
+    """
     try:
         response = httpx.get(
             "https://html.duckduckgo.com/html/",
-            params={"q": f"site:modulargrid.net {model_name} eurorack module"},
+            params={"q": f"site:modulargrid.net {search_text} eurorack module"},
             headers={"User-Agent": _UA},
             timeout=_TIMEOUT,
             follow_redirects=True,
@@ -166,30 +173,64 @@ def _search_ddg(model_name: str) -> str | None:
     except httpx.HTTPError:
         return None
 
-    # Extract module slugs from results
-    all_slugs = re.findall(r'modulargrid\.net/e/([\w-]+)', response.text)
+    module_slugs = _extract_module_slugs(response.text)
+    if not module_slugs:
+        return None
+
+    return _pick_best_slug(module_slugs, search_text, make_hint)
+
+
+def _extract_module_slugs(html: str) -> list[str]:
+    """Extract unique module slugs from ModularGrid URLs in HTML."""
+    all_slugs = re.findall(r'modulargrid\.net/e/([\w-]+)', html)
 
     skip = (
         "modules", "forum", "offers", "vendors", "racks", "marketplace",
         "about", "users", "search", "patches",
     )
-    seen = set()
-    module_slugs = []
+    seen: set[str] = set()
+    module_slugs: list[str] = []
     for slug in all_slugs:
         if slug not in seen and not slug.startswith(skip):
             seen.add(slug)
             module_slugs.append(slug)
+    return module_slugs
 
-    if not module_slugs:
-        return None
 
-    # Prefer slugs containing the model name
-    model_lower = model_name.lower().replace(" ", "-")
-    for slug in module_slugs:
-        if model_lower in slug:
+def _pick_best_slug(
+    slugs: list[str], search_text: str, make_hint: str | None = None,
+) -> str | None:
+    """Pick the best module slug from a list of candidates.
+
+    Priority:
+    1. Slugs containing both the make hint and search text
+    2. Slugs containing the search text (model name)
+    3. Slugs containing the make hint
+    4. None — don't blindly return the first result for ambiguous searches
+    """
+    text_lower = search_text.lower().replace(" ", "-")
+    make_slug = _slugify(make_hint) if make_hint else None
+
+    # Priority 1: slug contains both make and search text
+    if make_slug:
+        for slug in slugs:
+            if make_slug in slug and text_lower in slug:
+                return slug
+
+    # Priority 2: slug contains search text
+    for slug in slugs:
+        if text_lower in slug:
             return slug
 
-    return module_slugs[0]
+    # Priority 3: slug contains make hint
+    if make_slug:
+        for slug in slugs:
+            if make_slug in slug:
+                return slug
+
+    # Don't blindly return the first result — it may be a completely
+    # unrelated module (e.g., "DPW Design Zero" when searching for "d0")
+    return None
 
 
 def _extract_description_and_features(html: str) -> tuple[str | None, list[str]]:
