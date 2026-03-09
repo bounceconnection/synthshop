@@ -15,7 +15,9 @@ from synthshop.core.config import settings
 # Tool schema for structured output — defines what Claude returns
 IDENTIFY_TOOL = {
     "name": "identify_synth",
-    "description": "Return structured identification results for the music equipment in the photos.",
+    "description": (
+        "Return structured identification results for the music equipment in the photos."
+    ),
     "input_schema": {
         "type": "object",
         "required": [
@@ -137,9 +139,9 @@ def _encode_image(path: Path) -> tuple[str, str]:
 
     # Claude API limit is 5MB for the base64 string. Base64 inflates size
     # by ~4/3, so the raw file limit is ~3.75MB to stay under 5MB encoded.
-    MAX_RAW_BYTES = (5 * 1024 * 1024 * 3) // 4  # ~3.75MB
-    if len(image_bytes) > MAX_RAW_BYTES:
-        image_bytes = _resize_image(image_bytes, MAX_RAW_BYTES)
+    max_raw_bytes = (5 * 1024 * 1024 * 3) // 4  # ~3.75MB
+    if len(image_bytes) > max_raw_bytes:
+        image_bytes = _resize_image(image_bytes, max_raw_bytes)
         mime_type = "image/jpeg"
 
     data = base64.standard_b64encode(image_bytes).decode("utf-8")
@@ -156,7 +158,7 @@ def _resize_image(image_bytes: bytes, max_bytes: int) -> bytes:
     scale = 0.9
     while True:
         new_size = (int(img.width * scale), int(img.height * scale))
-        resized = img.resize(new_size, Image.LANCZOS)
+        resized = img.resize(new_size, Image.Resampling.LANCZOS)
         buf = io.BytesIO()
         resized.save(buf, format="JPEG", quality=quality)
         if buf.tell() <= max_bytes:

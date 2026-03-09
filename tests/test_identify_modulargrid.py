@@ -9,6 +9,7 @@ Verifies that when ModularGrid finds a match, the identify command:
 
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 
 from synthshop.cli.commands.identify import _verify_with_modulargrid
@@ -448,7 +449,7 @@ class TestDisplayModuleImage:
     def test_silently_skips_on_download_error(self, mock_get, mock_kitty):
         from synthshop.cli.commands.identify import _display_module_image
 
-        mock_get.side_effect = Exception("Network error")
+        mock_get.side_effect = httpx.ConnectError("Network error")
 
         # Should not raise
         _display_module_image("https://example.com/broken.jpg")

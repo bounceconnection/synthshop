@@ -2,6 +2,7 @@
 
 from typing import Annotated
 
+import httpx
 import typer
 from rich.console import Console
 
@@ -20,9 +21,9 @@ def unpublish(
 
     try:
         product = store.load(product_id)
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         console.print(f"[red]Product not found: {product_id}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from exc
 
     if product.reverb:
         console.print(f"Ending Reverb listing #{product.reverb.listing_id}...")
@@ -30,7 +31,7 @@ def unpublish(
             with ReverbClient() as client:
                 client.end_listing(product.reverb.listing_id)
             console.print("[green]Reverb listing ended.[/green]")
-        except Exception as e:
+        except (OSError, httpx.HTTPError) as e:
             console.print(f"[red]Reverb error: {e}[/red]")
             console.print("[yellow]Updating local status anyway.[/yellow]")
     else:
@@ -49,9 +50,9 @@ def sold(
 
     try:
         product = store.load(product_id)
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
         console.print(f"[red]Product not found: {product_id}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from exc
 
     if product.reverb and product.status == ProductStatus.LISTED:
         console.print(f"Ending Reverb listing #{product.reverb.listing_id}...")
@@ -59,7 +60,7 @@ def sold(
             with ReverbClient() as client:
                 client.end_listing(product.reverb.listing_id)
             console.print("[green]Reverb listing ended.[/green]")
-        except Exception as e:
+        except (OSError, httpx.HTTPError) as e:
             console.print(f"[red]Reverb error: {e}[/red]")
 
     product.status = ProductStatus.SOLD

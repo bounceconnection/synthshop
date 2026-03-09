@@ -124,8 +124,16 @@ class ReverbClient:
             listing_id=listing["id"],
             slug=listing.get("slug"),
             url=listing.get("_links", {}).get("web", {}).get("href"),
-            state=listing.get("state", {}).get("slug") if isinstance(listing.get("state"), dict) else listing.get("state"),
+            state=self._extract_state(listing),
         )
+
+    @staticmethod
+    def _extract_state(listing: dict) -> str | None:
+        """Extract listing state slug from Reverb's varying response format."""
+        state = listing.get("state")
+        if isinstance(state, dict):
+            return state.get("slug")
+        return state
 
     def update_listing(self, listing_id: int, product: Product) -> ReverbListing:
         """Update an existing Reverb listing.
@@ -144,7 +152,7 @@ class ReverbClient:
             listing_id=listing["id"],
             slug=listing.get("slug"),
             url=listing.get("_links", {}).get("web", {}).get("href"),
-            state=listing.get("state", {}).get("slug") if isinstance(listing.get("state"), dict) else listing.get("state"),
+            state=self._extract_state(listing),
         )
 
     def publish_listing(self, listing_id: int) -> dict:
@@ -338,7 +346,9 @@ class ReverbClient:
             }
 
         if product.condition_notes:
-            payload["description"] = f"{payload['description']}\n\nCondition: {product.condition_notes}"
+            payload["description"] = (
+                f"{payload['description']}\n\nCondition: {product.condition_notes}"
+            )
 
         return payload
 

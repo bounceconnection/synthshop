@@ -3,10 +3,11 @@
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 import typer
 from rich.console import Console
 
-from synthshop.cli.commands.identify import _display_result, identify
+from synthshop.cli.commands.identify import identify
 from synthshop.core.models import Condition, PriceRange, Product, ProductStatus
 from synthshop.core.product_store import ProductStore
 from synthshop.integrations.claude_vision import SynthIdentification
@@ -15,7 +16,7 @@ from synthshop.integrations.reverb import ReverbClient
 console = Console()
 
 
-def publish(
+def publish(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     photos: Annotated[
         list[Path],
         typer.Argument(help="Image files of the item (JPEG, PNG, GIF, WebP)."),
@@ -97,7 +98,7 @@ def publish(
                 client.upload_images(reverb_listing.listing_id, photos)
 
                 product.status = ProductStatus.LISTED if live else ProductStatus.DRAFT
-        except Exception as e:
+        except (OSError, httpx.HTTPError) as e:
             console.print(f"[red]Reverb error: {e}[/red]")
             console.print("[yellow]Saving product locally without Reverb listing.[/yellow]")
 
@@ -112,7 +113,7 @@ def publish(
             console.print("[dim]Listing is in draft — go to Reverb to review and publish.[/dim]")
 
 
-def _build_product(
+def _build_product(  # pylint: disable=too-many-arguments
     *,
     identification: SynthIdentification | None,
     make: str | None,
@@ -148,12 +149,12 @@ def _build_product(
             shipping_price=shipping_price,
             local_image_paths=local_image_paths,
         )
-    else:
-        return Product(
-            make=make,  # type: ignore[arg-type]
-            model=model,  # type: ignore[arg-type]
-            condition=condition,
-            price=price,
-            shipping_price=shipping_price,
-            local_image_paths=local_image_paths,
-        )
+
+    return Product(
+        make=make,  # type: ignore[arg-type]
+        model=model,  # type: ignore[arg-type]
+        condition=condition,
+        price=price,
+        shipping_price=shipping_price,
+        local_image_paths=local_image_paths,
+    )

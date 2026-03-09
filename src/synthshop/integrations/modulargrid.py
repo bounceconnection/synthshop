@@ -238,6 +238,60 @@ def _extract_description_and_features(html: str) -> tuple[str | None, list[str]]
     return description, features
 
 
+def _extract_title(html: str) -> str | None:
+    """Extract the module title from og:title or <title> tag."""
+    og_match = re.search(r'property="og:title"[^>]*content="([^"]+)"', html, re.IGNORECASE)
+    if og_match:
+        return og_match.group(1).strip()
+
+    title_match = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
+    if title_match:
+        title = title_match.group(1).strip()
+        return re.sub(r'\s*[-–]\s*Eurorack Module.*$', '', title, flags=re.IGNORECASE)
+
+    return None
+
+
+def _extract_manufacturer_and_model(title: str, url: str) -> tuple[str, str]:
+    """Split a ModularGrid title into manufacturer and model using the URL slug."""
+    slug_match = re.search(r'/e/([\w-]+)$', url)
+
+    if slug_match:
+        slug = slug_match.group(1)
+        words = title.split()
+        for i in range(len(words) - 1, 0, -1):
+            candidate_make = " ".join(words[:i])
+            make_slug = candidate_make.lower().replace(" ", "-")
+            if slug.startswith(make_slug):
+                return candidate_make, " ".join(words[i:])
+
+    words = title.split()
+    if len(words) >= 2:
+        return " ".join(words[:-1]), words[-1]
+    return title, title
+
+
+def _extract_subtitle(html: str) -> str | None:
+    """Extract module subtitle from <p class="lead"> or og:description."""
+    lead_match = re.search(
+        r'<p\s+class="lead[^"]*">(.*?)</p>', html, re.DOTALL | re.IGNORECASE
+    )
+    if lead_match:
+        subtitle = re.sub(r'<[^>]+>', '', lead_match.group(1)).strip()
+        if subtitle:
+            return subtitle
+
+    og_desc = re.search(
+        r'property="og:description"[^>]*content="([^"]+)"', html, re.IGNORECASE
+    )
+    if og_desc:
+        parts = og_desc.group(1).strip().split(" - ")
+        if len(parts) >= 3:
+            return parts[-1].strip()
+
+    return None
+
+
 def fetch_module_page(url: str) -> dict | None:
     """Fetch a ModularGrid module page and extract key details.
 
@@ -256,83 +310,25 @@ def fetch_module_page(url: str) -> dict | None:
 
     html = response.text
 
-    # Best source: og:title contains "{Manufacturer} {Model}"
-    og_match = re.search(r'property="og:title"[^>]*content="([^"]+)"', html, re.IGNORECASE)
-    title_match = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
-
-    if og_match:
-        title = og_match.group(1).strip()
-    elif title_match:
-        title = title_match.group(1).strip()
-        title = re.sub(r'\s*[-–]\s*Eurorack Module.*$', '', title, flags=re.IGNORECASE)
-    else:
+    title = _extract_title(html)
+    if not title:
         return None
 
-    # Extract manufacturer and model from URL slug + title
-    slug_match = re.search(r'/e/([\w-]+)$', url)
-    manufacturer = None
-    model_name = title
-
-    if slug_match:
-        slug = slug_match.group(1)
-        words = title.split()
-        for i in range(len(words) - 1, 0, -1):
-            candidate_make = " ".join(words[:i])
-            make_slug = candidate_make.lower().replace(" ", "-")
-            if slug.startswith(make_slug):
-                manufacturer = candidate_make
-                model_name = " ".join(words[i:])
-                break
-
-    if not manufacturer:
-        words = title.split()
-        if len(words) >= 2:
-            manufacturer = " ".join(words[:-1])
-            model_name = words[-1]
-        else:
-            manufacturer = title
+    manufacturer, model_name = _extract_manufacturer_and_model(title, url)
 
     hp_match = re.search(r'(\d+)\s*HP', html)
-    hp = int(hp_match.group(1)) if hp_match else None
-
-    discontinued = bool(re.search(r'discontinued', html, re.IGNORECASE))
-
-    # Extract subtitle — try <p class="lead"> first (most reliable),
-    # fall back to og:description which can truncate on special chars.
-    subtitle = None
-    lead_match = re.search(
-        r'<p\s+class="lead[^"]*">(.*?)</p>', html, re.DOTALL | re.IGNORECASE
-    )
-    if lead_match:
-        subtitle = re.sub(r'<[^>]+>', '', lead_match.group(1)).strip()
-
-    if not subtitle:
-        og_desc = re.search(
-            r'property="og:description"[^>]*content="([^"]+)"', html, re.IGNORECASE
-        )
-        if og_desc:
-            desc_text = og_desc.group(1).strip()
-            # Format: "{Manufacturer} {Model} - Eurorack Module - {Subtitle}"
-            parts = desc_text.split(" - ")
-            if len(parts) >= 3:
-                subtitle = parts[-1].strip()
-
-    # Extract full description and features from #module-details section
     description, features = _extract_description_and_features(html)
-
-    # Extract panel image URL
     img_match = re.search(r'href="(/img/modcache/\d+\.f\.jpg)"', html)
-    image_url = f"https://modulargrid.net{img_match.group(1)}" if img_match else None
 
     return {
         "manufacturer": manufacturer,
         "model": model_name,
         "full_title": title,
-        "hp": hp,
-        "discontinued": discontinued,
-        "subtitle": subtitle,
+        "hp": int(hp_match.group(1)) if hp_match else None,
+        "discontinued": bool(re.search(r'discontinued', html, re.IGNORECASE)),
+        "subtitle": _extract_subtitle(html),
         "description": description,
         "features": features,
-        "image_url": image_url,
+        "image_url": f"https://modulargrid.net{img_match.group(1)}" if img_match else None,
         "url": url,
     }

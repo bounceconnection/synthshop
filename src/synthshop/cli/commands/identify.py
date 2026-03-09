@@ -1,5 +1,7 @@
 """synthshop identify — Identify a synth from photos using Claude Vision."""
 
+import base64
+import sys
 from io import BytesIO
 from pathlib import Path
 from typing import Annotated
@@ -11,7 +13,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.status import Status
 from rich.table import Table
-from rich.text import Text
 
 from synthshop.integrations.claude_vision import SynthIdentification, identify_from_photos
 from synthshop.integrations.modulargrid import search_modulargrid
@@ -55,9 +56,9 @@ def identify(
             spinner="dots",
         ):
             result = identify_from_photos(photos, model=model)
-    except Exception as e:
+    except (OSError, ValueError, RuntimeError) as e:
         console.print(f"[red]Identification failed: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from e
     console.print()
 
     # Cross-reference with ModularGrid for eurorack modules
@@ -77,12 +78,34 @@ def _verify_with_modulargrid(result: SynthIdentification) -> SynthIdentification
     Claude Vision often misidentifies niche eurorack manufacturers, and sometimes
     swaps make/model. We try multiple search strategies to find the right module.
     """
-    # Try model name first, then make name (Claude sometimes swaps them)
+    mg = _search_modulargrid_with_fallback(result)
+    if not mg:
+        console.print("[dim]No ModularGrid match found. Verify manufacturer manually.[/dim]\n")
+        return result
+
+    make_wrong = mg["manufacturer"].lower() != result.make.lower()
+    model_wrong = mg["model"].lower() != result.model.lower()
+    old_make = result.make
+
+    _print_modulargrid_status(mg, result, make_wrong, model_wrong)
+
+    if make_wrong or model_wrong:
+        result.make = mg["manufacturer"]
+        result.model = mg["model"]
+
+    if mg.get("image_url"):
+        _display_module_image(mg["image_url"])
+
+    _apply_modulargrid_data(result, mg, old_make, make_wrong)
+    return result
+
+
+def _search_modulargrid_with_fallback(result: SynthIdentification) -> dict | None:
+    """Try multiple search strategies on ModularGrid."""
     search_terms = [result.model]
     if result.make.lower() != result.model.lower():
         search_terms.append(result.make)
 
-    mg = None
     with Status("Checking ModularGrid...", console=console, spinner="dots") as status:
         for term in search_terms:
             mg = search_modulargrid(
@@ -91,22 +114,16 @@ def _verify_with_modulargrid(result: SynthIdentification) -> SynthIdentification
                 on_progress=lambda msg: status.update(f"ModularGrid: {msg}"),
             )
             if mg:
-                break
+                return mg
+    return None
 
-    if not mg:
-        console.print("[dim]No ModularGrid match found. Verify manufacturer manually.[/dim]\n")
-        return result
 
+def _print_modulargrid_status(
+    mg: dict, result: SynthIdentification, make_wrong: bool, model_wrong: bool,
+) -> None:
+    """Print whether ModularGrid confirmed or corrected the identification."""
     mg_manufacturer = mg["manufacturer"]
     mg_model = mg["model"]
-    mg_url = mg["url"]
-
-    # Check if Claude got the make or model wrong
-    make_wrong = mg_manufacturer.lower() != result.make.lower()
-    model_wrong = mg_model.lower() != result.model.lower()
-
-    old_make = result.make
-    old_model = result.model
 
     if make_wrong or model_wrong:
         console.print(
@@ -114,53 +131,48 @@ def _verify_with_modulargrid(result: SynthIdentification) -> SynthIdentification
             f"[bold]{mg_manufacturer} {mg_model}[/bold]"
         )
         if make_wrong:
-            console.print(f"  Manufacturer: {old_make} → {mg_manufacturer}")
+            console.print(f"  Manufacturer: {result.make} → {mg_manufacturer}")
         if model_wrong:
-            console.print(f"  Model: {old_model} → {mg_model}")
-        console.print(f"[dim]Source: {mg_url}[/dim]\n")
-
-        result.make = mg_manufacturer
-        result.model = mg_model
+            console.print(f"  Model: {result.model} → {mg_model}")
+        console.print(f"[dim]Source: {mg['url']}[/dim]\n")
     else:
         console.print(
             f"[green]ModularGrid confirmed: {mg_manufacturer} {mg_model}[/green]\n"
         )
 
-    # Show the module panel image from ModularGrid
-    if mg.get("image_url"):
-        _display_module_image(mg["image_url"])
 
-    # Replace Claude's description with ModularGrid's authoritative one
+def _apply_modulargrid_data(
+    result: SynthIdentification, mg: dict, old_make: str, make_wrong: bool,
+) -> None:
+    """Apply ModularGrid description, features, and notes to the identification."""
     if mg.get("description"):
         result.description = mg["description"]
     elif make_wrong:
-        # Fallback: fix manufacturer name in Claude's description
-        result.description = result.description.replace(old_make, mg_manufacturer)
+        result.description = result.description.replace(old_make, mg["manufacturer"])
 
-    # Build features list from ModularGrid data
-    mg_features: list[str] = []
-    if mg.get("subtitle"):
-        mg_features.append(mg["subtitle"])
-    if mg.get("hp"):
-        mg_features.append(f"{mg['hp']}HP Eurorack module")
-    # Add the actual feature list from the ModularGrid page
-    if mg.get("features"):
-        mg_features.extend(mg["features"])
-    if mg.get("discontinued"):
-        mg_features.append("Discontinued — increasingly rare")
-
+    mg_features = _build_modulargrid_features(mg)
     if mg_features:
         result.features = mg_features
 
-    # Fix wrong manufacturer name in notes
     if make_wrong and result.notes:
-        result.notes = result.notes.replace(old_make, mg_manufacturer)
+        result.notes = result.notes.replace(old_make, mg["manufacturer"])
 
-    # Add discontinued to notes
     if mg.get("discontinued") and "discontinued" not in result.notes.lower():
         result.notes = f"Discontinued. {result.notes}".strip()
 
-    return result
+
+def _build_modulargrid_features(mg: dict) -> list[str]:
+    """Build a features list from ModularGrid data."""
+    features: list[str] = []
+    if mg.get("subtitle"):
+        features.append(mg["subtitle"])
+    if mg.get("hp"):
+        features.append(f"{mg['hp']}HP Eurorack module")
+    if mg.get("features"):
+        features.extend(mg["features"])
+    if mg.get("discontinued"):
+        features.append("Discontinued — increasingly rare")
+    return features
 
 
 def _display_module_image(image_url: str, max_height: int = 400) -> None:
@@ -172,13 +184,13 @@ def _display_module_image(image_url: str, max_height: int = 400) -> None:
     try:
         r = httpx.get(image_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
         img = Image.open(BytesIO(r.content)).convert("RGB")
-    except Exception:
+    except (OSError, httpx.HTTPError):
         return  # Silently skip if image can't be loaded
 
     # Scale down to reasonable terminal size, preserving aspect ratio
     if img.height > max_height:
         aspect = img.width / img.height
-        img = img.resize((int(max_height * aspect), max_height), Image.LANCZOS)
+        img = img.resize((int(max_height * aspect), max_height), Image.Resampling.LANCZOS)
 
     _kitty_display(img)
 
@@ -192,16 +204,13 @@ def _kitty_display(img: Image.Image) -> None:
     Works in Ghostty, Kitty, WezTerm, and other terminals supporting
     the Kitty graphics protocol.
     """
-    import base64
-    import sys
-
     buf = BytesIO()
     img.save(buf, format="PNG")
     data = base64.standard_b64encode(buf.getvalue())
 
     # Kitty protocol sends data in 4096-byte chunks
-    CHUNK = 4096
-    chunks = [data[i:i + CHUNK] for i in range(0, len(data), CHUNK)]
+    chunk_size = 4096
+    chunks = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
 
     for i, chunk in enumerate(chunks):
         is_last = i == len(chunks) - 1
@@ -224,7 +233,7 @@ def _check_reverb_pricing(result: SynthIdentification) -> SynthIdentification:
             with ReverbClient() as client:
                 query = f"{result.make} {result.model}"
                 price_data = client.get_price_guide(query)
-    except Exception:
+    except (OSError, httpx.HTTPError):
         console.print("[dim]Could not fetch Reverb pricing.[/dim]\n")
         return result
 

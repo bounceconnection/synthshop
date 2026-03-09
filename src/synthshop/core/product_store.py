@@ -1,6 +1,5 @@
 """CRUD operations for product JSON files in the products/ directory."""
 
-import json
 from pathlib import Path
 
 from synthshop.core.config import settings
@@ -38,7 +37,7 @@ class ProductStore:
         for path in self.products_dir.glob("*.json"):
             try:
                 products.append(Product.model_validate_json(path.read_text(encoding="utf-8")))
-            except Exception:
+            except (ValueError, KeyError, OSError):
                 # Skip malformed files rather than crashing
                 continue
         return sorted(products, key=lambda p: p.created_at, reverse=True)
