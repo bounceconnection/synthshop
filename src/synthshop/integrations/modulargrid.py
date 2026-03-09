@@ -297,17 +297,25 @@ def fetch_module_page(url: str) -> dict | None:
 
     discontinued = bool(re.search(r'discontinued', html, re.IGNORECASE))
 
-    # Extract subtitle from og:description (e.g. "Digital Super-Oscillator")
-    og_desc = re.search(
-        r'property="og:description"[^>]*content="([^"]+)"', html, re.IGNORECASE
-    )
+    # Extract subtitle — try <p class="lead"> first (most reliable),
+    # fall back to og:description which can truncate on special chars.
     subtitle = None
-    if og_desc:
-        desc_text = og_desc.group(1).strip()
-        # Format: "{Manufacturer} {Model} - Eurorack Module - {Subtitle}"
-        parts = desc_text.split(" - ")
-        if len(parts) >= 3:
-            subtitle = parts[-1].strip()
+    lead_match = re.search(
+        r'<p\s+class="lead[^"]*">(.*?)</p>', html, re.DOTALL | re.IGNORECASE
+    )
+    if lead_match:
+        subtitle = re.sub(r'<[^>]+>', '', lead_match.group(1)).strip()
+
+    if not subtitle:
+        og_desc = re.search(
+            r'property="og:description"[^>]*content="([^"]+)"', html, re.IGNORECASE
+        )
+        if og_desc:
+            desc_text = og_desc.group(1).strip()
+            # Format: "{Manufacturer} {Model} - Eurorack Module - {Subtitle}"
+            parts = desc_text.split(" - ")
+            if len(parts) >= 3:
+                subtitle = parts[-1].strip()
 
     # Extract full description and features from #module-details section
     description, features = _extract_description_and_features(html)

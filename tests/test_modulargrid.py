@@ -68,6 +68,24 @@ DESCRIPTION_ONLY_HTML = """
 </html>
 """
 
+# Module where og:description truncates the subtitle due to quotes
+QUOTED_SUBTITLE_HTML = """
+<html>
+<head>
+<meta property="og:title" content="Magerit LANIAKEA">
+<meta property="og:description" content="Magerit LANIAKEA - Eurorack Module - A ">
+<title>Magerit LANIAKEA</title>
+</head>
+<body>
+<div class="box-specs"><dl><dt>Dimensions</dt><dd>14 HP</dd></dl></div>
+<div id="module-details">
+                <p class="lead wrap">A "cosmic" oscillator</p><p>The LANIAKEA concept is about sound textures.</p>
+            </div>
+            <hr>
+</body>
+</html>
+"""
+
 # Module with no description at all
 MINIMAL_HTML = """
 <html>
@@ -224,6 +242,20 @@ class TestFetchModulePage:
         assert result is not None
         assert result["description"] is None
         assert result["features"] == []
+
+    @patch("synthshop.integrations.modulargrid.httpx.get")
+    def test_subtitle_from_lead_tag_when_og_truncated(self, mock_get):
+        """When og:description truncates subtitle (e.g. quotes), use <p class='lead'> instead."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = QUOTED_SUBTITLE_HTML
+        mock_response.raise_for_status = MagicMock()
+        mock_get.return_value = mock_response
+
+        result = fetch_module_page("https://modulargrid.net/e/magerit-laniakea")
+
+        assert result is not None
+        assert result["subtitle"] == 'A "cosmic" oscillator'
 
     @patch("synthshop.integrations.modulargrid.httpx.get")
     def test_404_returns_none(self, mock_get):

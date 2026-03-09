@@ -255,6 +255,37 @@ class TestVerifyWithModularGrid:
         assert "Analog waveshaping" in result.features
 
     @patch("synthshop.cli.commands.identify.search_modulargrid")
+    def test_no_feature_list_shows_metadata_only(self, mock_search):
+        """When ModularGrid has no feature list, show subtitle/HP only."""
+        claude = SynthIdentification(
+            make="Magamart",
+            model="LANIAKEA",
+            category="synthesizers",
+            description="Wrong description.",
+            features=["Wavetable oscillator", "Built-in reverb", "Stereo output"],
+            condition="Excellent",
+            price_low=180.0,
+            price_high=250.0,
+            confidence="medium",
+        )
+        mg_data = {
+            "manufacturer": "Magerit",
+            "model": "LANIAKEA",
+            "full_title": "Magerit LANIAKEA",
+            "hp": 14,
+            "discontinued": False,
+            "subtitle": 'A "cosmic" oscillator',
+            "description": "The LANIAKEA concept comes from the idea of exploring all possible sound textures.",
+            "features": [],  # No feature list on ModularGrid
+            "url": "https://modulargrid.net/e/magerit-laniakea",
+        }
+        mock_search.return_value = mg_data
+
+        result = _verify_with_modulargrid(claude)
+
+        assert result.features == ['A "cosmic" oscillator', "14HP Eurorack module"]
+
+    @patch("synthshop.cli.commands.identify.search_modulargrid")
     def test_no_description_falls_back_to_name_replacement(self, mock_search, claude_chainsaw_wrong):
         """When ModularGrid has no description, fix manufacturer name in Claude's."""
         mg_data = {

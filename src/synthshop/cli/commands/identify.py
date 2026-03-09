@@ -129,7 +129,7 @@ def _verify_with_modulargrid(result: SynthIdentification) -> SynthIdentification
         # Fallback: fix manufacturer name in Claude's description
         result.description = result.description.replace(old_make, mg_manufacturer)
 
-    # Replace Claude's features with ModularGrid's accurate list
+    # Build features list from ModularGrid data
     mg_features: list[str] = []
     if mg.get("subtitle"):
         mg_features.append(mg["subtitle"])
@@ -142,8 +142,6 @@ def _verify_with_modulargrid(result: SynthIdentification) -> SynthIdentification
         mg_features.append("Discontinued — increasingly rare")
 
     if mg_features:
-        # Keep only Claude's condition-related notes (e.g. "scratches on panel")
-        # but replace technical features entirely with ModularGrid data
         result.features = mg_features
 
     # Fix wrong manufacturer name in notes
