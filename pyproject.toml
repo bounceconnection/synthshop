@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "synthshop"
 version = "0.1.0"
 description = "CLI tool and shop for listing synths on Reverb and direct via Stripe"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2.0",
