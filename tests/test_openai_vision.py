@@ -295,3 +295,34 @@ def test_only_item_derivatives_and_relevant_facts_leave_backend(
     ):
         assert private not in request.content.decode()
     assert payload["store"] is False
+
+
+def strict_schema_violations(node, path="$"):
+    """Places where a JSON Schema breaks OpenAI strict Structured Outputs rules."""
+    if isinstance(node, list):
+        return [
+            found for index, child in enumerate(node)
+            for found in strict_schema_violations(child, f"{path}[{index}]")
+        ]
+    if not isinstance(node, dict):
+        return []
+    found = [f"{path}.default"] if "default" in node else []
+    if node.get("type") == "object":
+        if node.get("additionalProperties") is not False:
+            found.append(f"{path}.additionalProperties")
+        if set(node.get("required", ())) != set(node.get("properties", {})):
+            found.append(f"{path}.required")
+    for key, child in node.items():
+        found += strict_schema_violations(child, f"{path}.{key}")
+    return found
+
+
+def test_request_demands_strict_complete_candidate(application, draft, openai_response):
+    openai_response.respond(200, json=response_body(Candidate().model_dump_json()))
+    application.analyze(draft.id, draft.revision)
+    output_format = json.loads(openai_response.calls[0].request.content)["text"]["format"]
+    assert output_format["type"] == "json_schema"
+    assert output_format["strict"] is True
+    schema = output_format["schema"]
+    assert set(schema["properties"]) == set(Candidate.model_fields)
+    assert strict_schema_violations(schema) == []
