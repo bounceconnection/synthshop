@@ -34,7 +34,7 @@ def test_binding_covers_publishing_destination_and_staging_only():
 
     assert binding() == binding(
         vision_model="other-model",
-        anthropic_api_key="test-only",
+        openai_api_key="test-only",
         data_dir="/elsewhere",
         products_dir="/legacy",
     )

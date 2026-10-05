@@ -1,6 +1,7 @@
 """No test reads credentials, existing inventory, or real provider accounts."""
 
 import io
+import socket
 
 import pytest
 from PIL import Image
@@ -12,7 +13,11 @@ from synthshop.core.config import Settings
 @pytest.fixture(autouse=True)
 def empty_credentials(monkeypatch):
     for name in (
-        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENAI_ORG_ID",
+        "OPENAI_PROJECT_ID",
+        "VISION_MODEL",
         "REVERB_API_TOKEN",
         "R2_ACCOUNT_ID",
         "R2_ACCESS_KEY_ID",
@@ -21,6 +26,16 @@ def empty_credentials(monkeypatch):
         "PRODUCTS_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_external_network(monkeypatch):
+    """A provider-double mismatch must fail locally, never contact a real account."""
+    def reject_connection(*_args, **_kwargs):
+        raise AssertionError("Tests cannot open network connections")
+
+    monkeypatch.setattr(socket.socket, "connect", reject_connection)
+    monkeypatch.setattr(socket.socket, "connect_ex", reject_connection)
 
 
 @pytest.fixture

@@ -10,7 +10,7 @@ from synthshop.core.models import OWNER_FACT_FIELDS, Comparable, Draft, Money, S
 from synthshop.core.photos import MAX_PHOTOS, PhotoLibrary
 from synthshop.core.pricing import from_reverb, recommendation
 from synthshop.core.product_store import DraftConflictError, DraftStore
-from synthshop.integrations.claude_vision import identify_from_photos
+from synthshop.integrations.openai_vision import identify_from_photos
 from synthshop.integrations.reverb import ReverbClient
 
 EDITABLE = OWNER_FACT_FIELDS + (

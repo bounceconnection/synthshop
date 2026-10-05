@@ -2,14 +2,14 @@
 
 ## Overview
 
-Local website with a CLI launcher for identifying music gear from photos, researching prices, reviewing editable drafts, and explicitly approving Reverb publication. Uses Claude Vision and the Reverb API; restricted marketplace evidence is entered manually.
+Local website with a CLI launcher for identifying music gear from photos, researching prices, reviewing editable drafts, and explicitly approving Reverb publication. Uses OpenAI vision and the Reverb API; restricted marketplace evidence is entered manually.
 
 ## Tech Stack
 
 - Python 3.11+ with type hints throughout
 - **CLI:** Typer + Rich launcher; FastAPI/Jinja2/Uvicorn loopback website
 - **Data:** Pydantic models, Decimal money, revisioned SQLite and managed local photos
-- **APIs:** Anthropic (Claude Vision), Reverb (HAL+JSON), private R2 signed-URL image staging
+- **APIs:** OpenAI (Responses API vision), Reverb (HAL+JSON), private R2 signed-URL image staging
 - **Testing:** pytest with isolated storage/credentials and provider doubles; pylint must be 10/10
 - **Build:** Hatchling, editable install via `pip install -e ".[dev]"`
 
@@ -20,7 +20,7 @@ src/synthshop/
   cli/main.py       serve launcher command
   web/              FastAPI routes, Jinja templates, local styles
   core/             models, config, SQLite store, photos, pricing, application, publishing
-  integrations/     claude_vision.py, reverb.py, staging.py
+  integrations/     openai_vision.py, reverb.py, staging.py
 tests/              Behavioral safety and recovery tests (no live credentials)
 products/           Legacy JSON import source; originals retained
 ```
@@ -36,7 +36,7 @@ pylint src/synthshop/      # Lint (must be 10/10)
 
 ## Key Patterns
 
-- Claude Vision uses **tool calling** for structured output (not free-text parsing)
+- OpenAI vision uses **strict JSON Schema Structured Outputs** with local validation (not free-text extraction)
 - Reverb sold-tagged displayed prices remain distinct from active asks and confirmed transactions
 - ModularGrid/DDG scraping was removed; manual observations retain provenance and match review
 - The vision prompt flags custom/aftermarket panels **without attributing a maker**; there is no separate panel-detection pass
