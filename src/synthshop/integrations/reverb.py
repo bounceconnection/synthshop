@@ -1,5 +1,6 @@
 """Documented Reverb draft/update contract and bounded anonymous listing research."""
 
+import hashlib
 import re
 import time
 from urllib.parse import urlparse
@@ -7,6 +8,7 @@ from urllib.parse import urlparse
 import httpx
 
 from synthshop.core.config import Settings
+from synthshop.core.photos import MAX_BYTES, MAX_PHOTOS
 
 HEADERS = {
     "Accept": "application/hal+json",
@@ -127,6 +129,76 @@ class ReverbClient:
             raise ReverbAPIError("Unexpected remote listing ID")
         result = self.request("GET", f"listings/{listing_id}")
         return result.get("listing", result)
+
+    def photo_evidence(self, listing: dict) -> tuple[list[str], list[str]]:
+        """Hash served photos and cover; never infer identity from ingestion count.
+
+        https://www.reverb-api.com/docs/updating-listing-images documents id/url.
+        Listing HAL full/photo links are also returned by the public v3 API.
+        Neither contract promises original bytes: transformed evidence must fail closed.
+        """
+        try:
+            photos = listing["photos"]
+            cover = listing["_links"]["photo"]["href"]
+            if not isinstance(photos, list) or not 1 <= len(photos) <= MAX_PHOTOS:
+                raise ValueError
+            identities, urls = [], []
+            for photo in photos:
+                full = photo.get("_links", {}).get("full", {}).get("href")
+                url = photo.get("url") or full
+                if not url or (full and full != url):
+                    raise ValueError
+                identity = photo.get("id")
+                if identity is not None and (
+                    isinstance(identity, bool) or not str(identity).isdigit()
+                ):
+                    raise ValueError
+                identities.append(str(identity) if identity is not None else url)
+                urls.append(url)
+            if len(set(identities)) != len(photos) or len(set(urls)) != len(photos):
+                raise ValueError
+        except (KeyError, AttributeError, TypeError, ValueError) as exc:
+            raise ReverbAPIError(
+                "Remote photo/cover evidence is missing or ambiguous; publication not verified."
+            ) from exc
+        digests = [self.photo_digest(url) for url in urls]
+        cover_digest = digests[0] if cover == urls[0] else self.photo_digest(cover)
+        if cover_digest != digests[0]:
+            raise ReverbAPIError("Remote cover differs from the first photo; not verified.")
+        return identities, digests
+
+    @staticmethod
+    def photo_digest(url: str) -> str:
+        """Bounded credential-free read of an exact returned image URL, without rewriting."""
+        if not isinstance(url, str):
+            raise ReverbAPIError("Unsupported remote photo URL; publication not verified.")
+        parsed = urlparse(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc not in ("images.reverb.com", "rvb-img.reverb.com")
+            or parsed.fragment
+        ):
+            raise ReverbAPIError("Unsupported remote photo URL; publication not verified.")
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            # A separate client cannot leak the API token or reuse API/image cookies.
+            with (
+                httpx.Client(timeout=35, follow_redirects=False, trust_env=False) as images,
+                images.stream("GET", url) as response,
+            ):
+                if response.status_code != 200:
+                    raise ReverbAPIError("Remote photo download is not verified.")
+                for chunk in response.iter_bytes():
+                    size += len(chunk)
+                    if size > MAX_BYTES:
+                        raise ReverbAPIError("Remote photo exceeds the verification limit.")
+                    digest.update(chunk)
+        except httpx.HTTPError as exc:
+            raise ReverbAPIError("Remote photo download is not verified.") from exc
+        if not size:
+            raise ReverbAPIError("Remote photo is empty; publication not verified.")
+        return digest.hexdigest()
 
     def verify_ownership(self, listing: dict, sku: str) -> None:
         """Require both returned shop ownership and membership in authenticated own listings."""

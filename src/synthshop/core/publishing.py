@@ -168,6 +168,9 @@ class Publisher:
                             "fields, then review and approve again."
                         ) from exc
                     # Remote errors can contain signed URLs or account data; never persist them.
+                    if attempt.state == "published":
+                        attempt.state = "published_unverified"
+                    attempt.url = None
                     attempt.error = (
                         "Provider operation not verified. No second create will be sent after an "
                         "uncertain response. Reconcile this attempt; check permissions, photos, "
@@ -182,6 +185,7 @@ class Publisher:
         """Recoverable state machine. A crash at creating never reopens the POST opportunity."""
         store = self.app.store
         if attempt.state == "prepared":
+            self.app.settings.require_exact_photo_creates()
             staging = PhotoStaging(self.app.settings)
             urls = staging.stage(draft, attempt, store, self.app.photos)
             attempt.state = "creating"
@@ -218,13 +222,10 @@ class Publisher:
         client.verify_ownership(remote, attempt.correlation)
         state = remote.get("state", {}).get("slug")
         self._verify_fields(remote, payload)
-        image_ids = self._image_identities(remote, len(draft.photos))
-        if attempt.image_ids and attempt.image_ids != image_ids:
-            raise ReverbAPIError("Remote photo identity/order changed; publication not verified.")
-        attempt.image_ids = image_ids
+        self._verify_photos(client, remote, draft, attempt)
         store.save_attempt(attempt)
         if state == "draft":
-            if attempt.state == "published":
+            if attempt.state in ("published", "published_unverified"):
                 raise DraftConflictError(
                     "Previously published listing is no longer live; no automatic relist."
                 )
@@ -235,8 +236,7 @@ class Publisher:
             remote = client.get_listing(attempt.remote_id)
             client.verify_ownership(remote, attempt.correlation)
             self._verify_fields(remote, payload)
-            if self._image_identities(remote, len(draft.photos)) != attempt.image_ids:
-                raise ReverbAPIError("Published photo order changed.")
+            self._verify_photos(client, remote, draft, attempt)
         elif state != "live":
             raise ReverbAPIError(
                 "Remote state is neither draft nor live; no automatic end/delete/relist."
@@ -257,15 +257,25 @@ class Publisher:
         return attempt
 
     @staticmethod
-    def _image_identities(remote: dict, expected: int) -> list[str]:
-        photos = remote.get("photos", [])
-        identities = [
-            str(photo.get("id") or photo.get("_links", {}).get("full", {}).get("href", ""))
-            for photo in photos
-        ]
-        if len(identities) != expected or not all(identities) or len(set(identities)) != expected:
-            raise ReverbAPIError("Not all approved photos are confirmed ingested; reconcile later.")
-        return identities
+    def _verify_photos(client: ReverbClient, remote: dict, draft: Draft, attempt: Attempt) -> None:
+        """Establish the ordered derivative binding, including cover, before adopting IDs."""
+        image_ids, digests = client.photo_evidence(remote)
+        approved = [photo.digest for photo in draft.photos]
+        if digests != approved:
+            raise ReverbAPIError(
+                "Remote photo bytes/order do not exactly match approved derivatives. "
+                "Transformed or unsupported evidence cannot authorize publication."
+            )
+        if attempt.image_digests:
+            if attempt.image_ids != image_ids:
+                raise ReverbAPIError(
+                    "Remote photo identity/order changed; publication not verified."
+                )
+            if attempt.image_digests != approved:
+                raise ReverbAPIError("Persisted photo binding differs from approval; not verified.")
+        # Legacy ID-only baselines reach here only after exact byte/cover verification.
+        attempt.image_ids = image_ids
+        attempt.image_digests = digests
 
     @staticmethod
     def _verify_fields(remote: dict, payload: dict) -> None:
