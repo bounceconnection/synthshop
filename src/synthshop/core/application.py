@@ -1,4 +1,4 @@
-"""Photo/fact/research orchestration shared by web and CLI, without terminal presentation."""
+"""Photo/fact/research orchestration behind the local web UI, without HTML presentation."""
 
 import json
 from decimal import Decimal
