@@ -150,3 +150,6 @@ class Attempt(Record):
     error: str = ""
     staged_keys: list[str] = Field(default_factory=list)
     image_ids: list[str] = Field(default_factory=list)
+    # Positionally paired with image_ids, under this attempt's approved fingerprint.
+    # Empty on legacy ID-only attempts: those IDs are not correspondence proof.
+    image_digests: list[str] = Field(default_factory=list)
