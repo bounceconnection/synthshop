@@ -1,22 +1,87 @@
 """Loopback HTTP approval/security contracts and removed implicit publishing CLI."""
 
+import re
+
+import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from synthshop.cli.main import app
 from synthshop.web.app import create_app
 
+LOCAL = "http://127.0.0.1:8765"
+
 
 def browser(application):
     web = create_app(application.settings)
-    client = TestClient(web, base_url="http://127.0.0.1:8765")
-    client.get("/")
+    client = TestClient(web, base_url=LOCAL)
+    assert client.get(f"/unlock?key={web.state.unlock}").status_code == 200
     return client, web.state.csrf
 
 
-def test_removed_cli_publish_shortcut():
-    result = CliRunner().invoke(app, ["publish", "--live"])
+@pytest.mark.parametrize("command", [["publish", "--live"], ["list"]])
+def test_removed_cli_commands(command):
+    result = CliRunner().invoke(app, command)
     assert result.exit_code != 0
+
+
+def test_launcher_link_unlocks_one_browser_once(tmp_path, monkeypatch):
+    launched = {}
+    monkeypatch.setenv("PRODUCTS_DIR", str(tmp_path / "legacy"))
+    monkeypatch.setattr(
+        "synthshop.cli.main.uvicorn.run", lambda web, **options: launched.update(web=web, **options)
+    )
+    result = CliRunner().invoke(app, ["serve", "--no-open", "--data-dir", str(tmp_path / "data")])
+    assert result.exit_code == 0
+    assert launched["host"] == "127.0.0.1"
+    assert launched["access_log"] is False
+    link = re.search(rf"{LOCAL}(/unlock\?key=\S+)", result.output).group(1)
+    owner = TestClient(launched["web"], base_url=LOCAL)
+    assert owner.get("/").status_code == 403
+    unlocked = owner.get(link)
+    assert unlocked.status_code == 200
+    assert str(unlocked.url) == LOCAL + "/"
+    assert "Saved drafts" in unlocked.text
+    assert owner.get(link).status_code == 200
+    other = TestClient(launched["web"], base_url=LOCAL)
+    assert other.get(link).status_code == 403
+    assert "synthshop_session" not in other.cookies
+    assert other.get("/").status_code == 403
+
+
+def test_locked_server_exposes_nothing_without_launch_link(application, draft):
+    web = create_app(application.settings)
+    stranger = TestClient(web, base_url=LOCAL)
+    for path in ("/", f"/drafts/{draft.id}", f"/photos/{draft.photos[0].id}", "/unlock?key=guess"):
+        response = stranger.get(path)
+        assert response.status_code == 403
+        assert "set-cookie" not in response.headers
+        assert draft.title not in response.text
+    response = stranger.post(
+        f"/drafts/{draft.id}/review",
+        data={"csrf": web.state.csrf, "revision": draft.revision},
+        headers={"Origin": LOCAL},
+    )
+    assert response.status_code == 403
+    assert application.store.attempt(draft.id) is None
+
+
+def test_malformed_shipping_amount_is_a_field_error(application, draft):
+    client, csrf = browser(application)
+    for rates, message in (("CA=fifty", "Shipping rate CA"), ("CA", "CODE=amount")):
+        response = client.post(
+            f"/drafts/{draft.id}/save",
+            data={
+                "csrf": csrf,
+                "revision": draft.revision,
+                "price": "190",
+                "international_rates": rates,
+            },
+            headers={"Origin": LOCAL},
+        )
+        assert response.status_code == 400
+        assert message in response.text
+    assert application.store.load(draft.id).revision == draft.revision
 
 
 def test_cross_site_and_untrusted_host_cannot_upload(application, image_bytes):

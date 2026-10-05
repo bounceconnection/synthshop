@@ -3,10 +3,12 @@
 import json
 from decimal import Decimal
 
+from pydantic import TypeAdapter, ValidationError
+
 from synthshop.core.config import Settings
-from synthshop.core.models import OWNER_FACT_FIELDS, Comparable, Draft, ShippingRate
+from synthshop.core.models import OWNER_FACT_FIELDS, Comparable, Draft, Money, ShippingRate
 from synthshop.core.photos import MAX_PHOTOS, PhotoLibrary
-from synthshop.core.pricing import from_reverb
+from synthshop.core.pricing import from_reverb, recommendation
 from synthshop.core.product_store import DraftConflictError, DraftStore
 from synthshop.integrations.claude_vision import identify_from_photos
 from synthshop.integrations.reverb import ReverbClient
@@ -19,6 +21,15 @@ EDITABLE = OWNER_FACT_FIELDS + (
     "description",
     "price_reason",
 )
+MONEY = TypeAdapter(Money)
+
+
+def money(value: str, field: str) -> Decimal:
+    """Owner-entered USD amounts fail with a field-specific message, never a server error."""
+    try:
+        return MONEY.validate_python(value.strip())
+    except ValidationError as exc:
+        raise ValueError(f"{field} must be a USD amount such as 50.00.") from exc
 
 
 class Application:
@@ -46,6 +57,14 @@ class Application:
             raise ValueError("Upload 1–25 photos total per draft.")
         photos = [self.photos.add(content) for content in files]
         draft.photos.extend(photos)
+        return self.save(draft, revision)
+
+    def save(self, draft: Draft, revision: int | None) -> Draft:
+        """A blank price takes a supported recommendation; owner-entered prices always win."""
+        pricing = recommendation(draft)
+        if draft.price is None and pricing["ask"]:
+            draft.price = pricing["ask"]
+            draft.price_reason = draft.price_reason or pricing["rationale"]
         return self.store.save(draft, revision)
 
     def edit(self, draft_id: str, revision: int, fields: dict) -> Draft:
@@ -61,19 +80,29 @@ class Application:
                     setattr(draft, name, value)
                 if (changed or value) and name not in draft.owner_fields:
                     draft.owner_fields.append(name)
-        draft.price = fields.get("price") or None
+        price = str(fields.get("price") or "").strip()
+        draft.price = money(price, "Asking price") if price else None
         draft.offers_enabled = fields.get("offers_enabled") in (True, "on", "true")
         rates = [ShippingRate()]
         for line in str(fields.get("international_rates", "")).splitlines():
             if line.strip():
-                code, amount = line.strip().split("=", 1)
-                if code.strip() == "US_CON":
+                code, separator, amount = line.partition("=")
+                code = code.strip()
+                if not separator:
+                    raise ValueError("Enter each shipping rate as CODE=amount, such as CA=50.00.")
+                if code == "US_CON":
                     raise ValueError("Continental-US shipping must remain explicitly free.")
-                rates.append(ShippingRate(region_code=code.strip(), amount=Decimal(amount.strip())))
+                rates.append(
+                    ShippingRate(region_code=code, amount=money(amount, f"Shipping rate {code}"))
+                )
         if len({rate.region_code for rate in rates}) != len(rates):
             raise ValueError("Duplicate shipping destinations")
         draft.shipping = rates
-        return self.store.save(draft, revision)
+        if not draft.title:
+            draft.title = " ".join(filter(None, [draft.make, draft.model, draft.variant]))
+        if not draft.description:
+            draft.description = self.factual_copy(draft)
+        return self.save(draft, revision)
 
     def reorder(self, draft_id: str, revision: int, ids: list[str]) -> Draft:
         """First image is cover. Require an exact permutation, not arbitrary photo references."""
@@ -82,7 +111,7 @@ class Application:
             raise ValueError("Photo order must contain each current photo exactly once.")
         by_id = {photo.id: photo for photo in draft.photos}
         draft.photos = [by_id[photo_id] for photo_id in ids]
-        return self.store.save(draft, revision)
+        return self.save(draft, revision)
 
     def analyze(self, draft_id: str, revision: int) -> Draft:
         """Model proposes; owner facts/copy never disappear during regeneration."""
@@ -98,11 +127,13 @@ class Application:
             if name not in draft.owner_fields:
                 setattr(draft, name, getattr(candidate, name))
         if "title" not in draft.owner_fields:
-            draft.title = " ".join(filter(None, [draft.make, draft.model, draft.variant]))
+            draft.title = candidate.title or " ".join(
+                filter(None, [draft.make, draft.model, draft.variant])
+            )
         if "description" not in draft.owner_fields:
-            draft.description = self.factual_copy(draft)
+            draft.description = candidate.description or self.factual_copy(draft)
         draft.research_note = "Identity proposal updated; review the candidate and pricing match."
-        return self.store.save(draft, revision)
+        return self.save(draft, revision)
 
     @staticmethod
     def factual_copy(draft: Draft) -> str:
@@ -123,15 +154,6 @@ class Application:
             )
         return "\n\n".join(paragraphs)
 
-    def compose(self, draft_id: str, revision: int) -> Draft:
-        """Fill empty copy from owner facts without a model or overwriting saved text."""
-        draft = self.current(draft_id, revision)
-        if not draft.title:
-            draft.title = " ".join(filter(None, [draft.make, draft.model, draft.variant]))
-        if not draft.description:
-            draft.description = self.factual_copy(draft)
-        return self.store.save(draft, revision)
-
     def research(self, draft_id: str, revision: int) -> Draft:
         """Two bounded anonymous reads; never send private owner facts to marketplace search."""
         draft = self.current(draft_id, revision)
@@ -147,8 +169,7 @@ class Application:
                         collected.append(from_reverb(row, draft, sold=sold))
                     except (ValueError, KeyError, TypeError):
                         rejected += 1
-        # Preserve prior snapshots in revisions. Current manual evidence remains, but must match
-        # this identity afresh if it changed.
+        # Current manual evidence remains, but must match this identity afresh if it changed.
         manual = [
             comp for comp in draft.evidence if not comp.provenance.startswith("Anonymous Reverb")
         ]
@@ -163,7 +184,7 @@ class Application:
             "Filter support/retention is not guaranteed; no restricted Price Guide scraping. "
             f"{rejected} malformed observations omitted. Review exact matches and packages below."
         )
-        return self.store.save(draft, revision)
+        return self.save(draft, revision)
 
     def import_evidence(self, draft_id: str, revision: int, text: str) -> Draft:
         """Owner-pasted JSON observations; URLs are citations, never automatically fetched."""
@@ -173,14 +194,22 @@ class Application:
         rows = json.loads(text)
         if not isinstance(rows, list) or not 1 <= len(rows) <= 100:
             raise ValueError("Import a JSON array of 1–100 observations.")
-        observations = [Comparable.model_validate(row) for row in rows]
+        observations = []
+        for number, row in enumerate(rows, 1):
+            try:
+                observations.append(Comparable.model_validate(row))
+            except ValidationError as exc:
+                names = sorted({str(error["loc"][0]) for error in exc.errors() if error["loc"]})
+                raise ValueError(
+                    f"Observation {number}: check {', '.join(names) or 'its fields'}."
+                ) from exc
         for comp in observations:
             comp.provenance = "Owner-imported: " + comp.provenance
             comp.approved_match = False
         draft.evidence.extend(observations)
         if not draft.evidence_identity:
             draft.evidence_identity = draft.identity()
-        return self.store.save(draft, revision)
+        return self.save(draft, revision)
 
     def review_evidence(
         self, draft_id: str, revision: int, comp_id: str, include: bool, rationale: str
@@ -195,4 +224,4 @@ class Application:
         comp.approved_match = include
         comp.match_rationale = rationale.strip()
         comp.excluded_reason = "" if include else rationale.strip()
-        return self.store.save(draft, revision)
+        return self.save(draft, revision)

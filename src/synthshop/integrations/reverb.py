@@ -15,10 +15,15 @@ HEADERS = {
     "User-Agent": "SynthShop/0.2 (local listing assistant)",
     "X-Display-Currency": "USD",
 }
+NOT_CREATED = frozenset({401, 403, 422})
 
 
 class ReverbAPIError(ValueError):
     """Sanitized provider failure; raw bodies can contain private account data."""
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class ReverbClient:
@@ -62,7 +67,8 @@ class ReverbClient:
             hint = " Check fields: " + ", ".join(fields) if fields else ""
             raise ReverbAPIError(
                 f"Reverb {method} failed (HTTP {response.status_code}).{hint} "
-                "Check account permissions and listing requirements on Reverb."
+                "Check account permissions and listing requirements on Reverb.",
+                response.status_code,
             )
         result = response.json()
         if not isinstance(result, dict):
@@ -98,7 +104,7 @@ class ReverbClient:
         self.request("GET", "my/account")
         shop = self.request("GET", "shop")
         shop = shop.get("shop", shop)
-        url = shop.get("_links", {}).get("self", {}).get("web", {}).get("href", "")
+        url = shop.get("_links", {}).get("web", {}).get("href", "")
         slug = shop.get("slug") or url.rstrip("/").rsplit("/", 1)[-1]
         if (
             str(shop.get("id")) != self.settings.expected_shop_id
@@ -133,7 +139,10 @@ class ReverbClient:
             raise ReverbAPIError("Cannot uniquely verify listing in authenticated own listings.")
 
     def create_draft(self, payload: dict) -> dict:
-        """Exactly one POST per persisted attempt; publication is a separate operation."""
+        """Exactly one POST per persisted attempt; publication is a separate operation.
+
+        Only a NOT_CREATED status proves no listing exists; anything else stays ambiguous.
+        """
         result = self.request("POST", "listings", json={**payload, "publish": False})
         return result.get("listing", result)
 
@@ -145,7 +154,7 @@ class ReverbClient:
 
     def public_url(self, listing: dict) -> str:
         """Do not expose provider-controlled non-Reverb links as successful results."""
-        url = listing.get("_links", {}).get("self", {}).get("web", {}).get("href", "")
+        url = listing.get("_links", {}).get("web", {}).get("href", "")
         expected = (
             "sandbox.reverb.com" if "sandbox" in self.settings.reverb_base_url else "reverb.com"
         )

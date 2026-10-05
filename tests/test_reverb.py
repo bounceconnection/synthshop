@@ -5,20 +5,27 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+import respx
+from botocore.exceptions import ClientError
 
-from synthshop.core.models import ShippingRate
+from synthshop.core.config import Settings
+from synthshop.core.models import Attempt, ShippingRate
 from synthshop.core.product_store import DraftConflictError
 from synthshop.core.publishing import Publisher
+from synthshop.integrations.reverb import ReverbAPIError, ReverbClient
 
 
-class Provider:
-    """Stateful remote double for ambiguous outcomes and ownership failures."""
+class Provider(ReverbClient):
+    """Stateful remote double; inherited response parsing (public_url) is the real client's."""
 
-    def __init__(self, references):
+    def __init__(self, references, settings):
+        self.settings = settings
         self.reference_data = references
         self.remote = None
         self.creates = 0
         self.updates = 0
+        self.reject_create = None
+        self.malformed_price = False
         self.timeout_create = False
         self.timeout_publish = False
         self.empty_lookup = False
@@ -41,14 +48,21 @@ class Provider:
 
     def create_draft(self, payload):
         self.creates += 1
+        if self.reject_create:
+            raise ReverbAPIError("Reverb POST failed", self.reject_create)
         self.remote = deepcopy(payload)
         self.remote.update(
             id=42,
             shop_id=1333667,
             state={"slug": "draft"},
             photos=[] if self.drop_photos else [{"id": 101}],
-            _links={"self": {"web": {"href": "https://reverb.com/item/42"}}},
+            _links={
+                "self": {"href": "https://api.reverb.com/api/listings/42"},
+                "web": {"href": "https://reverb.com/item/42-example-meter"},
+            },
         )
+        if self.malformed_price:
+            self.remote["price"]["amount"] = "n/a"
         if self.timeout_create:
             raise httpx.ReadTimeout("response lost")
         return deepcopy(self.remote)
@@ -70,17 +84,18 @@ class Provider:
         if self.timeout_publish:
             raise httpx.ReadTimeout("publish response lost")
 
-    def public_url(self, _listing):
-        return "https://reverb.com/item/42"
-
 
 class Staging:
     """No external storage side effects in tests."""
+
+    failure = None
 
     def __init__(self, _settings):
         pass
 
     def stage(self, *_args):
+        if Staging.failure:
+            raise Staging.failure
         return ["https://example.invalid/approved-photo.jpg"]
 
     def cleanup(self, *_args):
@@ -93,7 +108,8 @@ def publication(application, references):
     application.settings.r2_account_id = "example"
     application.settings.r2_access_key_id = "test-only"
     application.settings.r2_secret_access_key = "test-only"
-    provider = Provider(references)
+    provider = Provider(references, application.settings)
+    Staging.failure = None
     with (
         patch("synthshop.core.publishing.ReverbClient", return_value=provider),
         patch("synthshop.core.publishing.PhotoStaging", Staging),
@@ -109,6 +125,7 @@ def test_explicit_review_then_one_publish_across_repeated_clicks(publication, dr
     second = publisher.publish(draft.id, draft.revision, review["token"])
     assert first.state == second.state == "published"
     assert first.remote_id == second.remote_id == "42"
+    assert first.url == "https://reverb.com/item/42-example-meter"
     assert provider.creates == 1
     assert provider.updates == 1
     assert provider.remote["condition"] == {"uuid": "poor-uuid"}
@@ -221,3 +238,125 @@ def test_linked_legacy_record_is_never_fresh_create(publication, application, dr
     with pytest.raises(ValueError, match="fresh create"):
         publisher.review(draft.id, draft.revision)
     assert provider.creates == 0
+
+
+def test_failure_before_create_releases_draft_for_correction(publication, application, draft):
+    publisher, provider = publication
+    review = publisher.review(draft.id, draft.revision)
+    Staging.failure = ClientError({"Error": {"Code": "AccessDenied"}}, "GetBucketLifecycle")
+    with pytest.raises(ValueError, match="No listing was created"):
+        publisher.publish(draft.id, draft.revision, review["token"])
+    assert application.store.attempt(draft.id) is None
+    assert provider.creates == 0
+    Staging.failure = None
+    application.settings.r2_secret_access_key = "corrected-test-only"
+    corrected = application.edit(
+        draft.id, draft.revision, {"title": "Corrected title", "price": "190"}
+    )
+    review = publisher.review(corrected.id, corrected.revision)
+    assert publisher.publish(corrected.id, corrected.revision, review["token"]).state == "published"
+    assert provider.creates == 1
+
+
+def test_prepared_leftover_never_blocks_fresh_approval(publication, application, draft):
+    publisher, provider = publication
+    application.store.save_attempt(
+        Attempt(
+            draft_id=draft.id,
+            revision=draft.revision,
+            correlation=f"synthshop-{draft.id}",
+            fingerprint="previous-environment",
+        )
+    )
+    review = publisher.review(draft.id, draft.revision)
+    assert publisher.publish(draft.id, draft.revision, review["token"]).state == "published"
+    assert provider.creates == 1
+
+
+@pytest.mark.parametrize("status", [401, 403, 422])
+def test_definite_create_rejection_permits_fresh_approval(publication, application, draft, status):
+    publisher, provider = publication
+    review = publisher.review(draft.id, draft.revision)
+    provider.reject_create = status
+    with pytest.raises(ValueError, match="No listing was created. Reverb POST failed"):
+        publisher.publish(draft.id, draft.revision, review["token"])
+    assert application.store.attempt(draft.id) is None
+    provider.reject_create = None
+    review = publisher.review(draft.id, draft.revision)
+    assert publisher.publish(draft.id, draft.revision, review["token"]).state == "published"
+    assert provider.creates == 2
+
+
+@pytest.mark.parametrize("status", [400, 409, 429, 500, 503])
+def test_other_create_failures_stay_locked_without_repost(publication, application, draft, status):
+    publisher, provider = publication
+    review = publisher.review(draft.id, draft.revision)
+    provider.reject_create = status
+    with pytest.raises(ValueError, match="not verified"):
+        publisher.publish(draft.id, draft.revision, review["token"])
+    assert application.store.attempt(draft.id).state == "creating"
+    provider.reject_create = None
+    with pytest.raises(ValueError, match="not verified"):
+        publisher.publish(draft.id, draft.revision, review["token"])
+    assert provider.creates == 1
+    with pytest.raises(DraftConflictError):
+        application.edit(draft.id, draft.revision, {"title": "Changed"})
+
+
+def test_sent_attempt_still_bound_to_publishing_environment(publication, application, draft):
+    publisher, provider = publication
+    review = publisher.review(draft.id, draft.revision)
+    provider.timeout_create = True
+    with pytest.raises(ValueError):
+        publisher.publish(draft.id, draft.revision, review["token"])
+    application.settings.r2_bucket_name = "other-bucket"
+    review = publisher.review(draft.id, draft.revision)
+    with pytest.raises(DraftConflictError, match="Environment changed"):
+        publisher.publish(draft.id, draft.revision, review["token"])
+    assert application.store.attempt(draft.id).state == "creating"
+    assert provider.creates == 1
+
+
+def test_malformed_remote_amount_is_recorded_on_attempt(publication, application, draft):
+    publisher, provider = publication
+    review = publisher.review(draft.id, draft.revision)
+    provider.malformed_price = True
+    with pytest.raises(ValueError):
+        publisher.publish(draft.id, draft.revision, review["token"])
+    attempt = application.store.attempt(draft.id)
+    assert attempt.remote_id == "42"
+    assert attempt.state == "remote"
+    assert attempt.error.startswith("Provider operation not verified")
+    assert provider.updates == 0
+
+
+@respx.mock
+def test_real_client_reads_documented_hal_web_links():
+    settings = Settings(_env_file=None, reverb_api_token="test-only")
+    respx.get("https://api.reverb.com/api/my/account").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    respx.get("https://api.reverb.com/api/shop").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 1333667,
+                "name": "bounce connection",
+                "_links": {
+                    "self": {"href": "https://api.reverb.com/api/shop"},
+                    "web": {"href": "https://reverb.com/shop/bounceconnection"},
+                },
+            },
+        )
+    )
+    listing = {
+        "_links": {
+            "self": {"href": "https://api.reverb.com/api/listings/42"},
+            "web": {"href": "https://reverb.com/item/42-example-meter"},
+        }
+    }
+    with ReverbClient(settings, authenticated=True) as client:
+        assert client.verify_shop()["slug"] == "bounceconnection"
+        assert client.public_url(listing) == "https://reverb.com/item/42-example-meter"
+        with pytest.raises(ReverbAPIError):
+            client.public_url({"_links": {"web": {"href": "https://evil.example/item/42"}}})

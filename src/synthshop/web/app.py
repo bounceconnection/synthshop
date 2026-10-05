@@ -19,6 +19,12 @@ from synthshop.core.publishing import Publisher
 from synthshop.integrations.reverb import ReverbClient
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+SESSION = "synthshop_session"
+
+
+def matches(supplied: str, expected: str) -> bool:
+    """Constant-time comparison that also tolerates non-ASCII attacker input."""
+    return bool(expected) and secrets.compare_digest(supplied.encode(), expected.encode())
 
 
 def render(request: Request, template: str, **context):
@@ -57,10 +63,16 @@ def request_rejection(request: Request) -> HTMLResponse | None:
 
 
 async def local_boundary(request: Request, call_next):
-    """Session cookies plus defense-in-depth content/embedding policies."""
+    """Launch-link session plus defense-in-depth content/embedding policies."""
     rejected = request_rejection(request)
     if rejected is not None:
         return rejected
+    if request.url.path != "/unlock" and not matches(
+        request.cookies.get(SESSION, ""), request.app.state.session
+    ):
+        return HTMLResponse(
+            "Locked. Open the one-time link printed by synthshop serve.", status_code=403
+        )
     response = await call_next(request)
     response.headers.update(
         {
@@ -73,19 +85,29 @@ async def local_boundary(request: Request, call_next):
             "base-uri 'none'; connect-src 'self'",
         }
     )
-    csrf = request.app.state.csrf
-    if request.method == "GET" and request.cookies.get("synthshop_session") != csrf:
-        response.set_cookie("synthshop_session", csrf, httponly=True, samesite="strict", path="/")
+    return response
+
+
+async def unlock(request: Request, key: str = ""):
+    """One-time redemption; async without awaits, so check-and-clear is atomic."""
+    state = request.app.state
+    if matches(request.cookies.get(SESSION, ""), state.session):
+        return RedirectResponse("/", status_code=303)
+    if not matches(key, state.unlock):
+        return HTMLResponse(
+            "This unlock link is invalid or already used. Restart synthshop serve for a new link.",
+            status_code=403,
+        )
+    state.unlock = ""
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(SESSION, state.session, httponly=True, samesite="strict", path="/")
     return response
 
 
 async def form_data(request: Request):
     """Every POST must carry the current session's unpredictable form token."""
     form = await request.form(max_files=25, max_fields=150, max_part_size=250_000)
-    csrf = request.app.state.csrf
-    if not secrets.compare_digest(
-        request.cookies.get("synthshop_session", ""), csrf
-    ) or not secrets.compare_digest(str(form.get("csrf", "")), csrf):
+    if not matches(str(form.get("csrf", "")), request.app.state.csrf):
         raise PermissionError("Session/CSRF check failed. Reload the local page.")
     return form
 
@@ -116,11 +138,15 @@ def create_app(settings: Settings | None = None, *, port: int = 8765) -> FastAPI
     publisher = Publisher(service)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.service = service
+    app.state.unlock = secrets.token_urlsafe(32)
+    app.state.session = secrets.token_urlsafe(32)
     app.state.csrf = secrets.token_urlsafe(32)
     app.state.origins = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
     app.middleware("http")(local_boundary)
     for error_type in (PermissionError, ValueError, KeyError, httpx.HTTPError, OSError):
         app.add_exception_handler(error_type, action_error)
+
+    app.get("/unlock")(unlock)
 
     @app.get("/", response_class=HTMLResponse)
     def index(request: Request):
@@ -166,11 +192,7 @@ def create_app(settings: Settings | None = None, *, port: int = 8765) -> FastAPI
     async def mutate(request: Request, draft_id: str, action: str):
         form = await form_data(request)
         revision = int(str(form.get("revision", "0")))
-        simple_actions = {
-            "analyze": service.analyze,
-            "compose": service.compose,
-            "research": service.research,
-        }
+        simple_actions = {"analyze": service.analyze, "research": service.research}
         if action in simple_actions:
             await run_in_threadpool(simple_actions[action], draft_id, revision)
         elif action == "save":

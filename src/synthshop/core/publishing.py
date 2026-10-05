@@ -5,7 +5,7 @@ import html
 import json
 import re
 import secrets
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import httpx
 from botocore.exceptions import BotoCoreError, ClientError
@@ -13,13 +13,24 @@ from botocore.exceptions import BotoCoreError, ClientError
 from synthshop.core.application import Application
 from synthshop.core.models import Attempt, Draft
 from synthshop.core.product_store import DraftConflictError
-from synthshop.integrations.reverb import ReverbAPIError, ReverbClient
+from synthshop.integrations.reverb import NOT_CREATED, ReverbAPIError, ReverbClient
 from synthshop.integrations.staging import PhotoStaging
 
 
 def text_content(value: str) -> str:
     """Compare provider HTML normalization without accepting changed public words."""
     return " ".join(html.unescape(re.sub(r"<[^>]*>", " ", value)).split())
+
+
+def remote_amount(value) -> Decimal:
+    """Malformed provider money is an unverified outcome, not a crash."""
+    try:
+        amount = Decimal(str(value))
+        if amount.is_finite():
+            return amount
+    except InvalidOperation:
+        pass
+    raise ReverbAPIError("Remote listing amount is malformed; publication not verified.")
 
 
 class Publisher:
@@ -149,6 +160,13 @@ class Publisher:
                     BotoCoreError,
                     ClientError,
                 ) as exc:
+                    if attempt.state == "prepared":
+                        self.app.store.release(attempt)
+                        detail = str(exc) if type(exc) in (ValueError, ReverbAPIError) else ""
+                        raise ValueError(
+                            f"No listing was created. {detail} Correct the configuration or "
+                            "fields, then review and approve again."
+                        ) from exc
                     # Remote errors can contain signed URLs or account data; never persist them.
                     attempt.error = (
                         "Provider operation not verified. No second create will be sent after an "
@@ -168,7 +186,12 @@ class Publisher:
             urls = staging.stage(draft, attempt, store, self.app.photos)
             attempt.state = "creating"
             store.save_attempt(attempt)
-            created = client.create_draft({**payload, "photos": urls})
+            try:
+                created = client.create_draft({**payload, "photos": urls})
+            except ReverbAPIError as exc:
+                if exc.status in NOT_CREATED:
+                    attempt.state = "prepared"
+                raise
             if not created.get("id"):
                 raise ReverbAPIError("Create returned no durable ID; outcome unknown.")
             attempt.remote_id = str(created["id"])
@@ -259,14 +282,14 @@ class Publisher:
         }:
             raise ReverbAPIError("Remote category differs from approval.")
         price = remote.get("price", {})
-        if price.get("currency") != "USD" or Decimal(price.get("amount", "-1")) != Decimal(
+        if price.get("currency") != "USD" or remote_amount(price.get("amount")) != Decimal(
             payload["price"]["amount"]
         ):
             raise ReverbAPIError("Remote price/currency differs from approval.")
 
         def rates(shipping: dict) -> list[tuple]:
             return sorted(
-                (row["region_code"], Decimal(row["rate"]["amount"]), row["rate"]["currency"])
+                (row["region_code"], remote_amount(row["rate"]["amount"]), row["rate"]["currency"])
                 for row in shipping.get("rates", [])
             )
 

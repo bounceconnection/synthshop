@@ -106,7 +106,7 @@ class Draft(Record):
     condition: str = ""
     category_id: str = ""
     category_name: str = ""
-    testing: str = "Not tested / not confirmed by owner."
+    testing: str = ""
     cosmetics: str = ""
     faults: str = ""
     modifications: str = ""

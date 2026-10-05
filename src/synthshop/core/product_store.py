@@ -1,4 +1,4 @@
-"""SQLite snapshots, optimistic revisions, durable attempts, and local process locks."""
+"""SQLite drafts, optimistic revisions, durable attempts, and local process locks."""
 
 import fcntl
 import json
@@ -26,8 +26,6 @@ class DraftStore:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS drafts (id TEXT PRIMARY KEY, revision INTEGER,
                     body TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS revisions (id TEXT, revision INTEGER, body TEXT,
-                    PRIMARY KEY(id, revision));
                 CREATE TABLE IF NOT EXISTS attempts (id TEXT PRIMARY KEY, body TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, token TEXT,
                     revision INTEGER, fingerprint TEXT, payload TEXT);
@@ -76,11 +74,10 @@ class DraftStore:
             if row is None and expected is not None:
                 raise DraftConflictError("Draft no longer exists")
             draft.revision = 1 if row is None else expected + 1
-            body = draft.model_dump_json()
             db.execute(
-                "INSERT OR REPLACE INTO drafts VALUES (?, ?, ?)", (draft.id, draft.revision, body)
+                "INSERT OR REPLACE INTO drafts VALUES (?, ?, ?)",
+                (draft.id, draft.revision, draft.model_dump_json()),
             )
-            db.execute("INSERT INTO revisions VALUES (?, ?, ?)", (draft.id, draft.revision, body))
             db.execute("DELETE FROM reviews WHERE id=?", (draft.id,))
         return draft
 
@@ -97,6 +94,11 @@ class DraftStore:
                 "INSERT OR REPLACE INTO attempts VALUES (?, ?)",
                 (attempt.draft_id, attempt.model_dump_json()),
             )
+
+    def release(self, attempt: Attempt) -> None:
+        """Drop an attempt that never sent a create, so the owner can correct and re-approve."""
+        with self.connect() as db:
+            db.execute("DELETE FROM attempts WHERE id=?", (attempt.draft_id,))
 
     def review(self, draft: Draft, token: str, fingerprint: str, payload: dict) -> None:
         """Snapshot a review, not permission to write remotely."""
@@ -129,18 +131,22 @@ class DraftStore:
             row = db.execute("SELECT body FROM attempts WHERE id=?", (draft.id,)).fetchone()
             if row:
                 attempt = Attempt.model_validate_json(row[0])
-                if attempt.fingerprint != fingerprint:
-                    raise DraftConflictError(
-                        "Environment changed after attempt. Restore it to reconcile."
-                    )
-                return attempt
+                if attempt.state != "prepared":
+                    if attempt.fingerprint != fingerprint:
+                        raise DraftConflictError(
+                            "Environment changed after attempt. Restore it to reconcile."
+                        )
+                    return attempt
             attempt = Attempt(
                 draft_id=draft.id,
                 revision=draft.revision,
                 correlation=f"synthshop-{draft.id}",
                 fingerprint=fingerprint,
             )
-            db.execute("INSERT INTO attempts VALUES (?, ?)", (draft.id, attempt.model_dump_json()))
+            db.execute(
+                "INSERT OR REPLACE INTO attempts VALUES (?, ?)",
+                (draft.id, attempt.model_dump_json()),
+            )
             return attempt
 
     @contextmanager
@@ -188,14 +194,14 @@ class DraftStore:
                     "condition, category, shipping and price. Original record retained.",
                     owner_fields=["make", "model", "variant", "description", "title", "condition"],
                 )
-                # Atomic import marker plus initial snapshot, so a restart cannot duplicate imports.
+                # Atomic import marker plus initial draft, so a restart cannot duplicate imports.
                 with self.connect() as db:
                     db.execute("BEGIN IMMEDIATE")
                     if db.execute("SELECT 1 FROM imports WHERE path=?", (key,)).fetchone():
                         continue
-                    body = draft.model_dump_json()
-                    db.execute("INSERT INTO drafts VALUES (?, 1, ?)", (draft.id, body))
-                    db.execute("INSERT INTO revisions VALUES (?, 1, ?)", (draft.id, body))
+                    db.execute(
+                        "INSERT INTO drafts VALUES (?, 1, ?)", (draft.id, draft.model_dump_json())
+                    )
                     db.execute("INSERT INTO imports VALUES (?, ?)", (key, draft.id))
             except (ValueError, KeyError, TypeError, OSError):
                 errors.append(

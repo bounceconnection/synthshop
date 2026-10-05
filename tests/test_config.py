@@ -26,3 +26,22 @@ def test_readiness_does_not_claim_scope_verification():
         settings.require_reverb()
     with pytest.raises(ValueError):
         settings.require_r2()
+
+
+def test_binding_covers_publishing_destination_and_staging_only():
+    def binding(**changes):
+        return Settings(_env_file=None, reverb_api_token="test-only", **changes).binding()
+
+    assert binding() == binding(
+        vision_model="other-model",
+        anthropic_api_key="test-only",
+        data_dir="/elsewhere",
+        products_dir="/legacy",
+    )
+    for change in (
+        {"r2_bucket_name": "other"},
+        {"r2_secret_access_key": "other"},
+        {"expected_shop_slug": "other"},
+        {"reverb_base_url": "https://sandbox.reverb.com/api"},
+    ):
+        assert binding() != binding(**change)

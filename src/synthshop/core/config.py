@@ -51,8 +51,14 @@ class Settings(BaseSettings):
         )
 
     def binding(self) -> str:
-        """Invalidate review on token, destination, environment, or staging change."""
-        values = [str(value) for value in self.model_dump(mode="json").values()]
+        """Invalidate review on token, destination, environment, or staging change only."""
+        values = [
+            self.reverb_base_url,
+            self.expected_shop_id,
+            self.expected_shop_slug,
+            str(self.r2_account_id),
+            self.r2_bucket_name,
+        ]
         for secret in (self.reverb_api_token, self.r2_access_key_id, self.r2_secret_access_key):
             values.append(secret.get_secret_value() if secret else "")
         return hashlib.sha256("|".join(values).encode()).hexdigest()

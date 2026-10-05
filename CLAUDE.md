@@ -17,7 +17,7 @@ Local website with a CLI launcher for identifying music gear from photos, resear
 
 ```
 src/synthshop/
-  cli/main.py       serve and local draft list commands
+  cli/main.py       serve launcher command
   web/              FastAPI routes, Jinja templates, local styles
   core/             models, config, SQLite store, photos, pricing, application, publishing
   integrations/     claude_vision.py, reverb.py, staging.py
@@ -39,6 +39,6 @@ pylint src/synthshop/      # Lint (must be 10/10)
 - Claude Vision uses **tool calling** for structured output (not free-text parsing)
 - Reverb sold-tagged displayed prices remain distinct from active asks and confirmed transactions
 - ModularGrid/DDG scraping was removed; manual observations retain provenance and match review
-- Custom panel detection **never attributes a maker** — only flags as "Custom/aftermarket panel"
+- The vision prompt flags custom/aftermarket panels **without attributing a maker**; there is no separate panel-detection pass
 - Reverb reads honor bounded 429 retry; writes are never automatically replayed after ambiguity
 - All changes must pass `pylint` with 10/10 score

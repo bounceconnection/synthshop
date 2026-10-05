@@ -36,7 +36,7 @@ def from_reverb(row: dict, draft: Draft, *, sold: bool) -> Comparable:
     for rate in row.get("shipping", {}).get("rates", []):
         if rate.get("region_code") == "US_CON" and rate.get("rate", {}).get("currency") == "USD":
             shipping = rate["rate"].get("amount")
-    url = row.get("_links", {}).get("self", {}).get("web", {}).get("href")
+    url = row.get("_links", {}).get("web", {}).get("href")
     if not url:
         url = f"https://reverb.com/item/{row['id']}"
     return Comparable(

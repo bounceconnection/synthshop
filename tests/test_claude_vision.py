@@ -1,6 +1,7 @@
 """Photo content decoding and owner fact precedence through regeneration."""
 
 import io
+from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
@@ -73,16 +74,35 @@ def test_owner_condition_and_copy_win_over_model(application, draft):
     assert regenerated.candidate.questions == ["Please confirm rear model label."]
 
 
-def test_generated_copy_does_not_import_model_unit_claims(application, draft):
-    draft.description = ""
-    draft = application.store.save(draft, draft.revision)
-    candidate = Candidate(make="Example", model="Meter", description="Mint fully tested with USB")
+def test_generated_copy_fills_unsaved_editable_copy(application, draft):
+    candidate = Candidate(
+        make="Example",
+        model="Meter",
+        title="Example Meter w/ Breakout Cable + Power Supply",
+        description="Included:\n-Meter\n-Breakout cable\n-Power supply",
+        questions=["How was the unit tested?"],
+    )
     with patch("synthshop.core.application.identify_from_photos", return_value=candidate):
         result = application.analyze(draft.id, draft.revision)
-    assert "fully tested" not in result.description
-    assert "USB" not in result.description
-    assert "Mint" not in result.description
+    assert result.title == candidate.title
+    assert result.description == candidate.description
     assert result.condition == "Poor"
+    assert result.price == Decimal("190.00")
+    edited = application.edit(result.id, result.revision, {"title": "", "price": "190"})
+    assert edited.title == "Example Meter"
+
+
+def test_manual_facts_fill_empty_copy_without_testing_claim(application, image_bytes):
+    item = application.upload([image_bytes])
+    saved = application.edit(
+        item.id,
+        item.revision,
+        {"make": "TC Electronic", "model": "Clarity M", "included": "Clarity M\n12V supply"},
+    )
+    assert saved.title == "TC Electronic Clarity M"
+    assert saved.description == "Included:\n-Clarity M\n-12V supply"
+    assert saved.testing == ""
+    assert "test" not in saved.description.casefold()
 
 
 def test_saving_unchanged_candidate_accepts_it_as_owner_text(application, draft):

@@ -1,5 +1,6 @@
 """Consumer-visible money and evidence boundaries."""
 
+import json
 from decimal import Decimal
 
 import pytest
@@ -81,8 +82,13 @@ def test_automatic_wrong_variant_and_date_semantics():
         "listing_currency": "EUR",
         "published_at": "2026-01-01",
         "condition": {"display_name": "Mint"},
+        "_links": {
+            "self": {"href": "https://api.reverb.com/api/listings/1"},
+            "web": {"href": "https://reverb.com/item/1-cloud-clone-bundle"},
+        },
     }
     result = from_reverb(row, item, sold=True)
+    assert str(result.url) == "https://reverb.com/item/1-cloud-clone-bundle"
     assert result.approved_match is False
     assert "maker" in result.excluded_reason
     assert "state" in result.excluded_reason
@@ -90,3 +96,48 @@ def test_automatic_wrong_variant_and_date_semantics():
     assert result.sale_date is None
     assert result.shipping is None
     assert result.listing_currency == "EUR"
+
+
+def test_supported_ask_fills_blank_price_but_owner_price_wins(application, draft):
+    rows = [
+        {
+            "provider": "eBay",
+            "url": f"https://www.ebay.com/itm/{number}",
+            "source_id": str(number),
+            "source_class": "sold_display",
+            "provenance": "Owner observed sold page",
+            "title": "Example Instruments Meter Stereo",
+            "amount": amount,
+            "shipping": "0",
+            "shipping_region": "US_CON",
+        }
+        for number, amount in ((1, "190.00"), (2, "210.00"))
+    ]
+    item = application.import_evidence(draft.id, draft.revision, json.dumps(rows))
+    for observation in item.evidence:
+        item = application.review_evidence(
+            item.id, item.revision, observation.id, True, "Exact model and package"
+        )
+    assert item.price == Decimal("190.00")
+    assert item.price_reason == "Owner price, insufficient market evidence"
+    item = application.edit(item.id, item.revision, {"price": "", "price_reason": ""})
+    assert item.price == Decimal("200.00")
+    assert "median of 2 reviewed sold_display" in item.price_reason
+    item = application.edit(item.id, item.revision, {"condition": "Mint", "price": ""})
+    assert item.price is None
+
+
+def test_malformed_money_input_names_the_field(application, draft):
+    with pytest.raises(ValueError, match="Asking price"):
+        application.edit(draft.id, draft.revision, {"price": "one ninety"})
+    row = {
+        "provider": "eBay",
+        "url": "https://www.ebay.com/itm/1",
+        "source_class": "sold_display",
+        "provenance": "Owner observed sold page",
+        "title": "Example",
+        "amount": "one ninety",
+    }
+    with pytest.raises(ValueError, match="Observation 1: check amount"):
+        application.import_evidence(draft.id, draft.revision, json.dumps([row]))
+    assert application.store.load(draft.id).revision == draft.revision
