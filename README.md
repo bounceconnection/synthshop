@@ -110,9 +110,16 @@ Official references:
 
 Reverb ingests accessible HTTPS image URLs. This app does not send localhost/blob URLs or assume a multipart upload endpoint. It uses the documented photo URL array in draft creation, then update/publish and result reads. Unexpected ownership, schemas, missing photos or field differences fail closed rather than pretending success.
 
-Real anonymous sold/active research and current category/condition/region reads were exercised. The actual CLI and browser were exercised with isolated local storage and empty credentials: photo intake, gallery order, owner edits, manual/automatic evidence, restart persistence, exact review and blocked approval. Behavioral provider doubles cover duplicate-click, ambiguous-create, lost-publish-response and ownership/media failure paths; **they are not proof of real provider compatibility**.
+Live verification is scoped to tested commit `80b37289eaeda70c229c5e25cfbfcf2a4167ca35`. The real `synthshop serve` launcher and Chrome were run on loopback with isolated local storage and no `.env` or provider credentials. Observed at that commit:
 
-Authenticated vision inference, authenticated bounceconnection ownership/scopes, Reverb draft/photo ingestion/update/live read-back, and R2 signed-URL compatibility still require separately authorized credentials and a sandbox account/bucket. They were not exercised against a real account during implementation. No production write is authorized by installation or by the development fixture.
+- **Local workflow:** photo intake (content-detected formats, EXIF orientation correction, metadata-free derivatives, non-image and animated-GIF rejection), gallery order, owner facts and copy, fact-based copy without an AI call, the missing-key Analyze refusal, manual evidence match review with recommendation-following price/reasoning and surviving owner overrides, malformed money/shipping rejection without a 500 or save, and exact review with approval disabled and an approval-less publish POST refused before any attempt.
+- **One-time unlock and access controls:** an HttpOnly, SameSite=Strict session; wrong or reused unlock links, cookieless requests, a wrong CSRF token and a cross-origin form post were refused.
+- **Restart persistence:** after relaunch the old link and session were refused; the new link restored drafts, photo order, copy, evidence, price/reasoning and shipping rates.
+- **Anonymous Reverb reads:** current categories and conditions, and sold/active research observations, which set no price until reviewed. This shows reachability, not authenticated compatibility.
+
+That run supplements the recorded Test exception: the automated Test phase could not bind a loopback socket or reach Reverb in its sandbox, so its scenarios ran in-process with transport doubles and are not relabeled as live. Malformed-row and model/bundle/condition mismatch research branches were not injected live. Duplicate-click, ambiguous-create, lost create/publish responses, SKU reconciliation without replay, prepared-attempt crash recovery and ownership/media failure paths are covered only in-process by tests with behavioral provider doubles; **they are not proof of real provider compatibility**.
+
+Authenticated vision inference, authenticated bounceconnection ownership/scopes, Reverb draft/photo ingestion/update/live read-back, and R2 signed-URL compatibility still require separately authorized credentials and a sandbox account/bucket. They were not exercised against a real account during implementation or the live verification above. No production write is authorized by installation or by the development fixture.
 
 ## Development
 
