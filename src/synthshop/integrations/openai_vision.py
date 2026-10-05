@@ -11,8 +11,8 @@ from synthshop.core.config import Settings
 from synthshop.core.models import Candidate, Draft
 
 SYSTEM = """Identify the actual music equipment in these item photos. Return candidate identity,
-confidence, visible observations and targeted questions as structured output. A shared manual, custom
-panel, or unreadable label is not proof of exact revision or maker. Flag aftermarket panels
+confidence, visible observations and targeted questions as structured output. A shared manual,
+custom panel, or unreadable label is not proof of exact revision or maker. Flag aftermarket panels
 without attributing their maker. Ask for safe, powered-off label photos if needed.
 Photos cannot prove operation, testing, calibration, rarity, smoke-free history, age, repairs,
 condition grade, or included accessories. Owner facts are authoritative; missing facts stay
