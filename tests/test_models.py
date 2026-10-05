@@ -98,7 +98,7 @@ def test_automatic_wrong_variant_and_date_semantics():
     assert result.listing_currency == "EUR"
 
 
-def test_supported_ask_fills_blank_price_but_owner_price_wins(application, draft):
+def test_unowned_price_follows_evidence_and_owner_price_wins(application, draft):
     rows = [
         {
             "provider": "eBay",
@@ -111,20 +111,31 @@ def test_supported_ask_fills_blank_price_but_owner_price_wins(application, draft
             "shipping": "0",
             "shipping_region": "US_CON",
         }
-        for number, amount in ((1, "190.00"), (2, "210.00"))
+        for number, amount in ((1, "200.00"), (2, "220.00"))
     ]
     item = application.import_evidence(draft.id, draft.revision, json.dumps(rows))
-    for observation in item.evidence:
-        item = application.review_evidence(
-            item.id, item.revision, observation.id, True, "Exact model and package"
-        )
+    first, second = (observation.id for observation in item.evidence)
+
+    def include(current, comp_id, keep=True):
+        return application.review_evidence(current.id, current.revision, comp_id, keep, "Exact")
+
+    item = include(include(item, first), second)
     assert item.price == Decimal("190.00")
     assert item.price_reason == "Owner price, insufficient market evidence"
     item = application.edit(item.id, item.revision, {"price": "", "price_reason": ""})
-    assert item.price == Decimal("200.00")
+    assert item.price == Decimal("210.00")
     assert "median of 2 reviewed sold_display" in item.price_reason
-    item = application.edit(item.id, item.revision, {"condition": "Mint", "price": ""})
+    form = {"price": str(item.price), "price_reason": item.price_reason}
+    item = application.edit(item.id, item.revision, form)
+    item = include(item, second, keep=False)
     assert item.price is None
+    assert item.price_reason == ""
+    item = include(item, second)
+    assert item.price == Decimal("210.00")
+    item = application.edit(item.id, item.revision, {"price": "230", "price_reason": ""})
+    item = include(item, second, keep=False)
+    assert item.price == Decimal("230.00")
+    assert item.price_reason == ""
 
 
 def test_malformed_money_input_names_the_field(application, draft):

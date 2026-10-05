@@ -51,15 +51,16 @@ def test_expiry_gates_upload_and_cleanup_is_scoped(application, draft, enabled):
             assert client.list_objects_v2(Bucket="synthshop-test")["KeyCount"] == 1
             assert application.store.attempt(draft.id) is None
             return
-        staging.stage(draft, attempt, application.store, application.photos)
-        persisted = application.store.attempt(draft.id)
-        key = persisted.staged_keys[0]
-        stored = client.get_object(Bucket="synthshop-test", Key=key)
-        assert stored["ContentType"] == "image/jpeg"
-        assert stored["Body"].read() == application.photos.path(draft.photos[0].id).read_bytes()
-        assert client.list_objects_v2(Bucket="synthshop-test")["KeyCount"] == 2
-        staging.cleanup(persisted, application.store)
-        assert application.store.attempt(draft.id).staged_keys == []
+        with application.store.publish_lock():
+            staging.stage(draft, attempt, application.store, application.photos)
+            persisted = application.store.attempt(draft.id)
+            key = persisted.staged_keys[0]
+            stored = client.get_object(Bucket="synthshop-test", Key=key)
+            assert stored["ContentType"] == "image/jpeg"
+            assert stored["Body"].read() == application.photos.path(draft.photos[0].id).read_bytes()
+            assert client.list_objects_v2(Bucket="synthshop-test")["KeyCount"] == 2
+            staging.cleanup(persisted, application.store)
+            assert application.store.attempt(draft.id).staged_keys == []
         assert (
             client.list_objects_v2(Bucket="synthshop-test")["Contents"][0]["Key"] == "unrelated.jpg"
         )

@@ -23,13 +23,32 @@ def test_restart_preserves_photos_facts_and_revision(application, draft):
     assert changed.revision == draft.revision + 1
 
 
-def test_attempt_freezes_edits(application, draft):
-    application.store.save_attempt(
-        Attempt(draft_id=draft.id, revision=draft.revision, correlation="one", fingerprint="hash")
+def attempt(draft, state):
+    return Attempt(
+        draft_id=draft.id,
+        revision=draft.revision,
+        correlation="one",
+        fingerprint="hash",
+        state=state,
     )
+
+
+def test_sent_attempt_freezes_edits(application, draft):
+    application.store.save_attempt(attempt(draft, "creating"))
     with pytest.raises(DraftConflictError):
         application.edit(draft.id, draft.revision, {"title": "Changed"})
     assert application.store.load(draft.id).title == draft.title
+
+
+def test_unsent_attempt_locks_only_while_publish_runs(application, draft):
+    application.store.save_attempt(attempt(draft, "prepared"))
+    with application.store.publish_lock():
+        with pytest.raises(DraftConflictError):
+            application.edit(draft.id, draft.revision, {"title": "Changed"})
+        assert application.store.attempt(draft.id).state == "prepared"
+    edited = application.edit(draft.id, draft.revision, {"title": "Changed"})
+    assert edited.title == "Changed"
+    assert application.store.attempt(draft.id) is None
 
 
 def test_import_linked_legacy_records_once_without_mutating_original(application, tmp_path):
@@ -51,6 +70,8 @@ def test_import_linked_legacy_records_once_without_mutating_original(application
     assert records[0].legacy_remote_id == "12345"
     assert records[0].legacy_status == "listed"
     assert json.loads(path.read_text()) == old
+    kept = application.edit(records[0].id, records[0].revision, {"faults": "None known"})
+    assert kept.price == 120
 
 
 def test_malformed_legacy_is_reported_not_skipped(application, tmp_path):

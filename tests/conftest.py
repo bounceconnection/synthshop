@@ -48,6 +48,7 @@ def draft(application, image_bytes):
     item.description = "Untested. Scratched panel."
     item.price = "190.00"
     item.price_reason = "Owner price, insufficient market evidence"
+    item.owner_fields = ["price", "price_reason"]
     return application.store.save(item, item.revision)
 
 

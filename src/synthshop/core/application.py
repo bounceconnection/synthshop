@@ -19,9 +19,16 @@ EDITABLE = OWNER_FACT_FIELDS + (
     "category_name",
     "title",
     "description",
-    "price_reason",
 )
 MONEY = TypeAdapter(Money)
+
+
+def owner_text(value) -> str:
+    """Bounded, trimmed owner-entered text."""
+    value = str(value).strip()
+    if len(value) > 12000:
+        raise ValueError("Each text field must be at most 12,000 characters.")
+    return value
 
 
 def money(value: str, field: str) -> Decimal:
@@ -60,11 +67,12 @@ class Application:
         return self.save(draft, revision)
 
     def save(self, draft: Draft, revision: int | None) -> Draft:
-        """A blank price takes a supported recommendation; owner-entered prices always win."""
+        """Price and reasoning the owner has not changed follow the current recommendation."""
         pricing = recommendation(draft)
-        if draft.price is None and pricing["ask"]:
+        if "price" not in draft.owner_fields:
             draft.price = pricing["ask"]
-            draft.price_reason = draft.price_reason or pricing["rationale"]
+        if "price_reason" not in draft.owner_fields:
+            draft.price_reason = pricing["rationale"] if pricing["ask"] else ""
         return self.store.save(draft, revision)
 
     def edit(self, draft_id: str, revision: int, fields: dict) -> Draft:
@@ -72,16 +80,13 @@ class Application:
         draft = self.current(draft_id, revision)
         for name in EDITABLE:
             if name in fields:
-                value = str(fields[name]).strip()
-                if len(value) > 12000:
-                    raise ValueError("Each text field must be at most 12,000 characters.")
+                value = owner_text(fields[name])
                 changed = value != getattr(draft, name)
                 if changed:
                     setattr(draft, name, value)
                 if (changed or value) and name not in draft.owner_fields:
                     draft.owner_fields.append(name)
-        price = str(fields.get("price") or "").strip()
-        draft.price = money(price, "Asking price") if price else None
+        self.own_pricing(draft, fields)
         draft.offers_enabled = fields.get("offers_enabled") in (True, "on", "true")
         rates = [ShippingRate()]
         for line in str(fields.get("international_rates", "")).splitlines():
@@ -103,6 +108,23 @@ class Application:
         if not draft.description:
             draft.description = self.factual_copy(draft)
         return self.save(draft, revision)
+
+    @staticmethod
+    def own_pricing(draft: Draft, fields: dict) -> None:
+        """A changed price/reason becomes the owner's; blank returns it to the recommendation."""
+        pricing = {}
+        if "price" in fields:
+            price = owner_text(fields["price"] or "")
+            pricing["price"] = money(price, "Asking price") if price else None
+        if "price_reason" in fields:
+            pricing["price_reason"] = owner_text(fields["price_reason"])
+        for name, value in pricing.items():
+            if value is None or value == "":
+                if name in draft.owner_fields:
+                    draft.owner_fields.remove(name)
+            elif value != getattr(draft, name) and name not in draft.owner_fields:
+                draft.owner_fields.append(name)
+            setattr(draft, name, value)
 
     def reorder(self, draft_id: str, revision: int, ids: list[str]) -> Draft:
         """First image is cover. Require an exact permutation, not arbitrary photo references."""

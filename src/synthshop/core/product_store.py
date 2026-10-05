@@ -62,6 +62,7 @@ class DraftStore:
 
     def save(self, draft: Draft, expected: int | None = None) -> Draft:
         """CAS update invalidates any previous approval, including photo order edits."""
+        self.attempt(draft.id)
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT revision FROM drafts WHERE id=?", (draft.id,)).fetchone()
@@ -82,7 +83,21 @@ class DraftStore:
         return draft
 
     def attempt(self, draft_id: str) -> Attempt | None:
-        """Recover the single opportunity, including ambiguous create outcomes."""
+        """Recover the single opportunity. Prepared sent nothing; it locks only mid-publish."""
+        found = self._read_attempt(draft_id)
+        if found is None or found.state != "prepared":
+            return found
+        try:
+            with self.publish_lock():
+                found = self._read_attempt(draft_id)
+                if found is not None and found.state == "prepared":
+                    self.release(found)
+                    return None
+                return found
+        except DraftConflictError:
+            return found
+
+    def _read_attempt(self, draft_id: str) -> Attempt | None:
         with self.connect() as db:
             row = db.execute("SELECT body FROM attempts WHERE id=?", (draft_id,)).fetchone()
         return Attempt.model_validate_json(row[0]) if row else None
@@ -192,7 +207,15 @@ class DraftStore:
                     legacy_status=data.get("status", "draft"),
                     migration_note="Imported legacy JSON. Re-upload current photos; recheck facts, "
                     "condition, category, shipping and price. Original record retained.",
-                    owner_fields=["make", "model", "variant", "description", "title", "condition"],
+                    owner_fields=[
+                        "make",
+                        "model",
+                        "variant",
+                        "description",
+                        "title",
+                        "condition",
+                        "price",
+                    ],
                 )
                 # Atomic import marker plus initial draft, so a restart cannot duplicate imports.
                 with self.connect() as db:
