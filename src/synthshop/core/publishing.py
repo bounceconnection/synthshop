@@ -81,8 +81,6 @@ class Publisher:
                 "Resolve failed legacy imports before publishing to prevent duplicates."
             )
         self.app.photos.verify(draft.photos)
-        if len({photo.digest for photo in draft.photos}) != len(draft.photos):
-            raise ValueError("Duplicate photo derivatives cannot establish unique correspondence.")
         return {
             "make": draft.make,
             "model": draft.model,
@@ -187,6 +185,7 @@ class Publisher:
         """Recoverable state machine. A crash at creating never reopens the POST opportunity."""
         store = self.app.store
         if attempt.state == "prepared":
+            self.app.settings.require_exact_photo_creates()
             staging = PhotoStaging(self.app.settings)
             urls = staging.stage(draft, attempt, store, self.app.photos)
             attempt.state = "creating"
@@ -267,10 +266,13 @@ class Publisher:
                 "Remote photo bytes/order do not exactly match approved derivatives. "
                 "Transformed or unsupported evidence cannot authorize publication."
             )
-        if attempt.image_ids and attempt.image_ids != image_ids:
-            raise ReverbAPIError("Remote photo identity/order changed; publication not verified.")
-        if attempt.image_digests and attempt.image_digests != approved:
-            raise ReverbAPIError("Persisted photo binding differs from approval; not verified.")
+        if attempt.image_digests:
+            if attempt.image_ids != image_ids:
+                raise ReverbAPIError(
+                    "Remote photo identity/order changed; publication not verified."
+                )
+            if attempt.image_digests != approved:
+                raise ReverbAPIError("Persisted photo binding differs from approval; not verified.")
         # Legacy ID-only baselines reach here only after exact byte/cover verification.
         attempt.image_ids = image_ids
         attempt.image_digests = digests

@@ -1,6 +1,7 @@
 """Behavioral approval/recovery tests. Fakes are not provider compatibility evidence."""
 
 import io
+import re
 from copy import deepcopy
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ from synthshop.core.models import Attempt, ShippingRate
 from synthshop.core.product_store import DraftConflictError
 from synthshop.core.publishing import Publisher
 from synthshop.integrations.reverb import ReverbAPIError, ReverbClient
+from tests.test_cli import LOCAL, browser
 
 
 class Provider(ReverbClient):
@@ -128,6 +130,7 @@ def publication(application, references):
     application.settings.r2_account_id = "example"
     application.settings.r2_access_key_id = "test-only"
     application.settings.r2_secret_access_key = "test-only"
+    application.settings.reverb_exact_photos_confirmed = True
     provider = Provider(references, application.settings)
     Staging.failure = None
     with (
@@ -257,6 +260,142 @@ def test_legacy_ids_cannot_bypass_correspondence(publication, application, draft
     assert provider.creates == provider.updates == 1
 
 
+@pytest.mark.parametrize("first_read", ["reversed", "substituted"])
+def test_legacy_id_baseline_yields_only_to_complete_byte_cover_proof(
+    publication, application, draft, first_read
+):
+    publisher, provider = publication
+    draft = application.upload([synthetic_image("blue")], draft.id, draft.revision)
+    approved = [application.photos.path(photo.id).read_bytes() for photo in draft.photos]
+    provider.initial_images = (
+        approved[::-1]
+        if first_read == "reversed"
+        else [synthetic_image("green"), synthetic_image("purple")]
+    )
+    review = publisher.review(draft.id, draft.revision)
+    with pytest.raises(ValueError):
+        publisher.publish(draft.id, draft.revision, review["token"])
+    legacy = application.store.attempt(draft.id)
+    legacy.image_ids = ["101", "102"]
+    application.store.save_attempt(legacy)
+    if first_read == "reversed":
+        provider.remote["photos"].reverse()
+    else:
+        provider.remote["photos"] = [
+            {"id": 201 + index, "url": f"https://images.reverb.com/image/upload/new-{index}.jpg"}
+            for index in range(2)
+        ]
+        for photo, content in zip(provider.remote["photos"], approved, strict=True):
+            provider.image_bytes[photo["url"]] = content
+    with pytest.raises(ValueError):
+        publisher.publish(draft.id, draft.revision, review["token"])
+    unproven = application.store.attempt(draft.id)
+    assert unproven.image_ids == ["101", "102"]
+    assert not unproven.image_digests
+    assert provider.updates == 0
+    provider.remote["_links"]["photo"]["href"] = provider.remote["photos"][0]["url"]
+    result = publisher.publish(draft.id, draft.revision, review["token"])
+    assert result.state == "published"
+    assert result.image_ids == [str(photo["id"]) for photo in provider.remote["photos"]]
+    assert result.image_digests == [photo.digest for photo in draft.photos]
+    assert provider.creates == provider.updates == 1
+
+
+def test_disabled_create_guard_refuses_before_staging_and_keeps_draft_editable(
+    publication, application, draft
+):
+    publisher, provider = publication
+    application.settings.reverb_exact_photos_confirmed = False
+    review = publisher.review(draft.id, draft.revision)
+    with (
+        patch("synthshop.core.publishing.PhotoStaging") as staging,
+        pytest.raises(ValueError, match="No listing was created. New production Reverb drafts"),
+    ):
+        publisher.publish(draft.id, draft.revision, review["token"])
+    staging.assert_not_called()
+    assert provider.creates == provider.updates == 0
+    assert application.store.attempt(draft.id) is None
+    edited = application.edit(draft.id, draft.revision, {"title": "Owner edit", "price": "190"})
+    assert edited.revision == draft.revision + 1
+
+
+@pytest.mark.parametrize("lost", ["create", "publish"])
+def test_disabled_create_guard_still_reconciles_existing_attempt_without_relisting(
+    publication, application, draft, lost
+):
+    publisher, provider = publication
+    review = publisher.review(draft.id, draft.revision)
+    setattr(provider, f"timeout_{lost}", True)
+    with pytest.raises(ValueError, match="not verified"):
+        publisher.publish(draft.id, draft.revision, review["token"])
+    setattr(provider, f"timeout_{lost}", False)
+    application.settings.reverb_exact_photos_confirmed = False
+    restarted = Publisher(Application(application.settings))
+    if lost == "create":
+        provider.empty_lookup = True
+        with pytest.raises(ValueError, match="not verified"):
+            restarted.publish(draft.id, draft.revision, review["token"])
+        assert application.store.attempt(draft.id).state == "creating"
+        provider.empty_lookup = False
+    result = restarted.publish(draft.id, draft.revision, review["token"])
+    assert result.state == "published"
+    assert result.image_digests == [photo.digest for photo in draft.photos]
+    assert provider.creates == provider.updates == 1
+
+
+def publish_in_browser(client, csrf, draft):
+    """Submit the rendered review form exactly as the owner's browser would."""
+    form = {"csrf": csrf, "revision": draft.revision}
+    review = client.post(f"/drafts/{draft.id}/review", data=form, headers={"Origin": LOCAL})
+    assert review.status_code == 200
+    token = re.search(r'name="token" value="([^"]+)"', review.text).group(1)
+    return client.post(
+        f"/drafts/{draft.id}/publish",
+        data={**form, "token": token, "approval": "publish-exact-revision"},
+        headers={"Origin": LOCAL},
+    )
+
+
+def test_browser_disabled_create_refusal_leaves_draft_editable(publication, application, draft):
+    _publisher, provider = publication
+    application.settings.reverb_exact_photos_confirmed = False
+    client, csrf = browser(application)
+    refused = publish_in_browser(client, csrf, draft)
+    assert refused.status_code == 400
+    assert "New production Reverb drafts are disabled" in refused.text
+    assert provider.creates == 0
+    assert application.store.attempt(draft.id) is None
+    saved = client.post(
+        f"/drafts/{draft.id}/save",
+        data={"csrf": csrf, "revision": draft.revision, "title": "Owner edit", "price": "190"},
+        headers={"Origin": LOCAL},
+    )
+    assert saved.status_code == 200
+    assert application.store.load(draft.id).title == "Owner edit"
+
+
+def test_browser_enabled_create_needs_exact_photos_and_reconciles_once_disabled(
+    publication, application, draft
+):
+    _publisher, provider = publication
+    draft = application.upload([synthetic_image("blue")], draft.id, draft.revision)
+    approved = [application.photos.path(photo.id).read_bytes() for photo in draft.photos]
+    provider.initial_images = approved[::-1]
+    client, csrf = browser(application)
+    unverified = publish_in_browser(client, csrf, draft)
+    assert unverified.status_code == 400
+    assert "Provider operation not verified" in unverified.text
+    assert provider.creates == 1
+    assert provider.updates == 0
+    provider.remote["photos"].reverse()
+    provider.remote["_links"]["photo"]["href"] = provider.remote["photos"][0]["url"]
+    application.settings.reverb_exact_photos_confirmed = False
+    reconciled = publish_in_browser(client, csrf, draft)
+    assert reconciled.status_code == 200
+    assert application.store.attempt(draft.id).state == "published"
+    assert provider.creates == provider.updates == 1
+
+
 def test_published_drift_revokes_success_without_enabling_relist(publication, application, draft):
     publisher, provider = publication
     review = publisher.review(draft.id, draft.revision)
@@ -327,15 +466,18 @@ def test_unverifiable_photo_metadata_never_publishes(publication, application, d
     assert provider.updates == 0
 
 
-def test_duplicate_approved_derivatives_refused_before_remote_create(
+def test_duplicate_approved_derivatives_bind_to_unique_remote_photos(
     publication, application, draft, image_bytes
 ):
     publisher, provider = publication
     draft = application.upload([image_bytes], draft.id, draft.revision)
-    with pytest.raises(ValueError):
-        publisher.review(draft.id, draft.revision)
-    assert application.store.attempt(draft.id) is None
-    assert provider.creates == provider.updates == 0
+    assert draft.photos[0].digest == draft.photos[1].digest
+    review = publisher.review(draft.id, draft.revision)
+    result = publisher.publish(draft.id, draft.revision, review["token"])
+    assert result.state == "published"
+    assert result.image_ids == ["101", "102"]
+    assert result.image_digests == [draft.photos[0].digest] * 2
+    assert provider.creates == provider.updates == 1
 
 
 def test_explicit_review_then_one_publish_across_repeated_clicks(publication, draft):
