@@ -287,7 +287,8 @@ def test_only_item_derivatives_and_relevant_facts_leave_backend(
         assert base64.b64decode(encoded) == application.photos.path(photo.id).read_bytes()
     text = next(part["text"] for part in content if part["type"] == "input_text")
     facts = json.loads(text.removeprefix("Owner facts: "))
-    assert facts == {**draft.owner_facts(), "condition": "Poor"}
+    assert facts == draft.owner_facts()
+    assert "condition" not in facts
     for private in (
         draft.price_reason, draft.research_note, draft.migration_note, draft.id,
         other.id, other.photos[0].id, str(application.store.root), "test-only",

@@ -32,7 +32,6 @@ def identify_from_photos(paths: list[Path], draft: Draft, settings: Settings) ->
         raise ValueError("Upload at least one photo before analysis.")
     api_key = settings.require_openai()
     facts = draft.owner_facts()
-    facts["condition"] = draft.condition
     content = [
         {
             "type": "input_image",
