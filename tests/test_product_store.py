@@ -1,111 +1,94 @@
-"""Tests for the ProductStore — CRUD operations on product JSON files."""
+"""Durability, stale tabs, tampering, and legacy duplicate prevention."""
+
+import json
 
 import pytest
 
-from synthshop.core.models import Condition, Product, ProductStatus
-from synthshop.core.product_store import ProductStore
+from synthshop.core.application import Application
+from synthshop.core.models import Attempt
+from synthshop.core.product_store import DraftConflictError, DraftStore
 
 
-@pytest.fixture
-def store(tmp_path):
-    """ProductStore backed by a temporary directory."""
-    return ProductStore(products_dir=tmp_path)
+def test_restart_preserves_photos_facts_and_revision(application, draft):
+    reopened = Application(application.settings)
+    restored = reopened.store.load(draft.id)
+    assert restored.model_dump() == draft.model_dump()
+    reopened.photos.verify(restored.photos)
+    changed = application.edit(
+        draft.id, draft.revision, {"faults": "Dead left input", "price": "180"}
+    )
+    with pytest.raises(DraftConflictError):
+        reopened.edit(draft.id, draft.revision, {"faults": "No faults"})
+    assert reopened.store.load(draft.id).faults == "Dead left input"
+    assert changed.revision == draft.revision + 1
 
 
-@pytest.fixture
-def sample_product():
-    """A minimal product for testing."""
-    return Product(make="Roland", model="Juno-106", price=1200.0, condition=Condition.GOOD)
+def attempt(draft, state):
+    return Attempt(
+        draft_id=draft.id,
+        revision=draft.revision,
+        correlation="one",
+        fingerprint="hash",
+        state=state,
+    )
 
 
-class TestSave:
-    def test_save_creates_json_file(self, store, sample_product):
-        path = store.save(sample_product)
-        assert path.exists()
-        assert path.suffix == ".json"
-        assert path.name == f"{sample_product.id}.json"
-
-    def test_save_overwrites_existing(self, store, sample_product):
-        store.save(sample_product)
-        sample_product.price = 1100.0
-        store.save(sample_product)
-        reloaded = store.load(sample_product.id)
-        assert reloaded.price == 1100.0
+def test_sent_attempt_freezes_edits(application, draft):
+    application.store.save_attempt(attempt(draft, "creating"))
+    with pytest.raises(DraftConflictError):
+        application.edit(draft.id, draft.revision, {"title": "Changed"})
+    assert application.store.load(draft.id).title == draft.title
 
 
-class TestLoad:
-    def test_load_existing(self, store, sample_product):
-        store.save(sample_product)
-        loaded = store.load(sample_product.id)
-        assert loaded.make == "Roland"
-        assert loaded.model == "Juno-106"
-        assert loaded.price == 1200.0
-        assert loaded.id == sample_product.id
-
-    def test_load_missing_raises(self, store):
-        with pytest.raises(FileNotFoundError, match="Product not found"):
-            store.load("nonexistent")
+def test_unsent_attempt_locks_only_while_publish_runs(application, draft):
+    application.store.save_attempt(attempt(draft, "prepared"))
+    with application.store.publish_lock():
+        with pytest.raises(DraftConflictError):
+            application.edit(draft.id, draft.revision, {"title": "Changed"})
+        assert application.store.attempt(draft.id).state == "prepared"
+    edited = application.edit(draft.id, draft.revision, {"title": "Changed"})
+    assert edited.title == "Changed"
+    assert application.store.attempt(draft.id) is None
 
 
-class TestListAll:
-    def test_list_empty(self, store):
-        assert store.list_all() == []
-
-    def test_list_multiple(self, store):
-        p1 = Product(make="Roland", model="Juno-106", price=1200.0)
-        p2 = Product(make="Moog", model="Sub 37", price=1500.0)
-        store.save(p1)
-        store.save(p2)
-        products = store.list_all()
-        assert len(products) == 2
-
-    def test_list_sorted_newest_first(self, store):
-        p1 = Product(make="Roland", model="Juno-106", price=1200.0)
-        store.save(p1)
-        p2 = Product(make="Moog", model="Sub 37", price=1500.0)
-        store.save(p2)
-        products = store.list_all()
-        # p2 was saved second, so its updated_at is newer
-        assert products[0].id == p2.id
-
-    def test_list_skips_malformed_files(self, store, sample_product):
-        store.save(sample_product)
-        # Write a malformed JSON file
-        (store.products_dir / "bad.json").write_text("not valid json")
-        products = store.list_all()
-        assert len(products) == 1
+def test_import_linked_legacy_records_once_without_mutating_original(application, tmp_path):
+    directory = tmp_path / "old"
+    directory.mkdir()
+    old = {
+        "make": "Old",
+        "model": "Synth",
+        "price": 120.0,
+        "status": "listed",
+        "reverb": {"listing_id": 12345},
+    }
+    path = directory / "old.json"
+    path.write_text(json.dumps(old))
+    assert application.store.import_legacy(directory) == []
+    assert DraftStore(application.store.root).import_legacy(directory) == []
+    records = application.store.list_all()
+    assert len(records) == 1
+    assert records[0].legacy_remote_id == "12345"
+    assert records[0].legacy_status == "listed"
+    assert json.loads(path.read_text()) == old
+    kept = application.edit(records[0].id, records[0].revision, {"faults": "None known"})
+    assert kept.price == 120
 
 
-class TestListByStatus:
-    def test_filter_by_status(self, store):
-        p1 = Product(make="Roland", model="Juno-106", price=1200.0, status=ProductStatus.DRAFT)
-        p2 = Product(make="Moog", model="Sub 37", price=1500.0, status=ProductStatus.LISTED)
-        p3 = Product(make="Korg", model="MS-20", price=900.0, status=ProductStatus.DRAFT)
-        store.save(p1)
-        store.save(p2)
-        store.save(p3)
-        drafts = store.list_by_status(ProductStatus.DRAFT)
-        assert len(drafts) == 2
-        listed = store.list_by_status(ProductStatus.LISTED)
-        assert len(listed) == 1
-        assert listed[0].make == "Moog"
+def test_malformed_legacy_is_reported_not_skipped(application, tmp_path):
+    (tmp_path / "bad.json").write_text("not json")
+    assert application.store.import_legacy(tmp_path)
 
 
-class TestDelete:
-    def test_delete_existing(self, store, sample_product):
-        store.save(sample_product)
-        store.delete(sample_product.id)
-        assert not store.exists(sample_product.id)
-
-    def test_delete_missing_raises(self, store):
-        with pytest.raises(FileNotFoundError, match="Product not found"):
-            store.delete("nonexistent")
+def test_photo_tampering_breaks_review(application, draft):
+    application.photos.path(draft.photos[0].id).write_bytes(b"changed")
+    with pytest.raises(ValueError, match="changed"):
+        application.photos.verify(draft.photos)
 
 
-class TestExists:
-    def test_exists_true(self, store, sample_product):
-        store.save(sample_product)
-        assert store.exists(sample_product.id)
-
-    def test_exists_false(self, store):
-        assert not store.exists("nonexistent")
+def test_order_is_exact_permutation(application, image_bytes):
+    item = application.upload([image_bytes, image_bytes])
+    ids = [photo.id for photo in item.photos]
+    with pytest.raises(ValueError):
+        application.reorder(item.id, item.revision, [ids[0], ids[0]])
+    updated = application.reorder(item.id, item.revision, ids[::-1])
+    assert [photo.id for photo in updated.photos] == ids[::-1]

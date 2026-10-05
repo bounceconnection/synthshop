@@ -1,88 +1,74 @@
-"""Application settings loaded from environment variables / .env file."""
+"""Backend-only configuration. Secret values are never part of drafts or templates."""
 
+import hashlib
 from pathlib import Path
+from typing import Literal
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Central configuration for SynthShop.
+    """Local single-owner settings, supplied by environment or protected .env."""
 
-    Values are loaded from environment variables, with .env file as fallback.
-    Only the keys needed for the current phase need to be set — optional fields
-    default to None so the app can start without every service configured.
-    """
-
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", validate_assignment=True)
+    anthropic_api_key: SecretStr | None = None
+    vision_model: str = "claude-sonnet-4-6"
+    reverb_api_token: SecretStr | None = None
+    reverb_base_url: Literal["https://api.reverb.com/api", "https://sandbox.reverb.com/api"] = (
+        "https://api.reverb.com/api"
     )
-
-    # Anthropic (Claude Vision)
-    anthropic_api_key: str | None = None
-
-    # Reverb API
-    reverb_api_token: str | None = None
-    reverb_base_url: str = "https://api.reverb.com/api"
-
-    # Cloudflare R2
-    r2_account_id: str | None = None
-    r2_access_key_id: str | None = None
-    r2_secret_access_key: str | None = None
-    r2_bucket_name: str = "synthshop"
-    r2_public_url: str | None = None
-
-    # Stripe
-    stripe_secret_key: str | None = None
-    stripe_publishable_key: str | None = None
-
-    # Shop
-    shop_base_url: str = "https://shop.bounceconnectionrecords.com"
-
-    # Paths
+    expected_shop_id: str = "1333667"
+    expected_shop_slug: str = "bounceconnection"
+    data_dir: Path = Path.home() / ".synthshop"
     products_dir: Path = Path("products")
+    r2_account_id: str | None = None
+    r2_access_key_id: SecretStr | None = None
+    r2_secret_access_key: SecretStr | None = None
+    r2_bucket_name: str = "synthshop"
 
     def require_anthropic(self) -> str:
-        """Return the Anthropic API key or raise if not configured."""
+        """Fail without exposing a credential."""
         if not self.anthropic_api_key:
-            raise ValueError("ANTHROPIC_API_KEY is required. Set it in .env or environment.")
-        return self.anthropic_api_key
+            raise ValueError("Configure ANTHROPIC_API_KEY in backend .env to analyze photos.")
+        return self.anthropic_api_key.get_secret_value()
 
     def require_reverb(self) -> str:
-        """Return the Reverb API token or raise if not configured."""
+        """Publication needs profile/listing read and write_listings access."""
         if not self.reverb_api_token:
-            raise ValueError("REVERB_API_TOKEN is required. Set it in .env or environment.")
-        return self.reverb_api_token
+            raise ValueError("Configure REVERB_API_TOKEN before review approval/publishing.")
+        return self.reverb_api_token.get_secret_value()
 
-    def require_r2(self) -> tuple[str, str, str, str, str]:
-        """Return R2 credentials or raise if not configured."""
-        missing = [
-            name
-            for name, val in [
-                ("R2_ACCOUNT_ID", self.r2_account_id),
-                ("R2_ACCESS_KEY_ID", self.r2_access_key_id),
-                ("R2_SECRET_ACCESS_KEY", self.r2_secret_access_key),
-                ("R2_PUBLIC_URL", self.r2_public_url),
-            ]
-            if not val
-        ]
-        if missing:
-            raise ValueError(f"R2 config incomplete. Missing: {', '.join(missing)}")
+    def require_r2(self) -> tuple[str, str, str, str]:
+        """Private signed-URL staging; no public bucket needed."""
+        if not all([self.r2_account_id, self.r2_access_key_id, self.r2_secret_access_key]):
+            raise ValueError("Configure private R2 image staging before publishing.")
         return (
-            self.r2_account_id,  # type: ignore[return-value]
-            self.r2_access_key_id,  # type: ignore[return-value]
-            self.r2_secret_access_key,  # type: ignore[return-value]
+            str(self.r2_account_id),
+            self.r2_access_key_id.get_secret_value(),
+            self.r2_secret_access_key.get_secret_value(),
             self.r2_bucket_name,
-            self.r2_public_url,  # type: ignore[return-value]
         )
 
-    def require_stripe(self) -> str:
-        """Return the Stripe secret key or raise if not configured."""
-        if not self.stripe_secret_key:
-            raise ValueError("STRIPE_SECRET_KEY is required. Set it in .env or environment.")
-        return self.stripe_secret_key
+    def binding(self) -> str:
+        """Invalidate review on token, destination, environment, or staging change only."""
+        values = [
+            self.reverb_base_url,
+            self.expected_shop_id,
+            self.expected_shop_slug,
+            str(self.r2_account_id),
+            self.r2_bucket_name,
+        ]
+        for secret in (self.reverb_api_token, self.r2_access_key_id, self.r2_secret_access_key):
+            values.append(secret.get_secret_value() if secret else "")
+        return hashlib.sha256("|".join(values).encode()).hexdigest()
 
-
-# Singleton — import this from other modules
-settings = Settings()
+    def readiness(self) -> dict[str, bool]:
+        """Presence only, not authenticated compatibility or scope proof."""
+        return {
+            "vision": bool(self.anthropic_api_key),
+            "reverb": bool(self.reverb_api_token),
+            "image_staging": all(
+                [self.r2_account_id, self.r2_access_key_id, self.r2_secret_access_key]
+            ),
+        }

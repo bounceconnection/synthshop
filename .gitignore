@@ -36,4 +36,7 @@ htmlcov/
 .claude/settings.local.json
 
 # Project-specific
-# Don't ignore products/ — that's our "database"
+products/
+.synthshop/
+*.sqlite3
+*.sqlite3-*
