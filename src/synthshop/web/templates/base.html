@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{% block title %}SynthShop{% endblock %}</title><link rel="stylesheet" href="/style.css"></head>
+<body><header><a class="brand" href="/">SYNTHSHOP <span>LOCAL STUDIO</span></a><div class="target">{{ target }} <small>{{ 'SANDBOX' if 'sandbox' in environment else 'PRODUCTION TARGET' }}</small></div></header>
+<main>{% block content %}{% endblock %}</main>
+<footer>Local drafts stay on this computer. Analysis sends photos to Anthropic; research reads public Reverb listings. Only explicit final approval can stage photos and publish.</footer>
+</body></html>

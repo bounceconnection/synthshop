@@ -1,1 +1,1 @@
-"""SynthShop — CLI tool and shop for listing synths on Reverb and direct via Stripe."""
+"""SynthShop: local photo-to-Reverb drafting, evidence, explicit review and publication."""
