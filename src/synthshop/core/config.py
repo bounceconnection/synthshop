@@ -12,8 +12,8 @@ class Settings(BaseSettings):
     """Local single-owner settings, supplied by environment or protected .env."""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", validate_assignment=True)
-    anthropic_api_key: SecretStr | None = None
-    vision_model: str = "claude-sonnet-4-6"
+    openai_api_key: SecretStr | None = None
+    vision_model: str = "gpt-4.1-mini"
     reverb_api_token: SecretStr | None = None
     reverb_base_url: Literal["https://api.reverb.com/api", "https://sandbox.reverb.com/api"] = (
         "https://api.reverb.com/api"
@@ -27,11 +27,11 @@ class Settings(BaseSettings):
     r2_secret_access_key: SecretStr | None = None
     r2_bucket_name: str = "synthshop"
 
-    def require_anthropic(self) -> str:
+    def require_openai(self) -> str:
         """Fail without exposing a credential."""
-        if not self.anthropic_api_key:
-            raise ValueError("Configure ANTHROPIC_API_KEY in backend .env to analyze photos.")
-        return self.anthropic_api_key.get_secret_value()
+        if not self.openai_api_key:
+            raise ValueError("Configure OPENAI_API_KEY in backend .env to analyze photos.")
+        return self.openai_api_key.get_secret_value()
 
     def require_reverb(self) -> str:
         """Publication needs profile/listing read and write_listings access."""
@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     def readiness(self) -> dict[str, bool]:
         """Presence only, not authenticated compatibility or scope proof."""
         return {
-            "vision": bool(self.anthropic_api_key),
+            "vision": bool(self.openai_api_key),
             "reverb": bool(self.reverb_api_token),
             "image_staging": all(
                 [self.r2_account_id, self.r2_access_key_id, self.r2_secret_access_key]
