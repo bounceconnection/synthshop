@@ -11,7 +11,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
 from synthshop.core.application import Application
-from synthshop.core.config import Settings
+from synthshop.core.config import MissingOpenAIKeyError, Settings
 from synthshop.core.photos import MAX_BYTES
 from synthshop.core.pricing import recommendation
 from synthshop.core.product_store import DraftConflictError
@@ -124,10 +124,15 @@ async def action_error(request: Request, exc: Exception):
         status = 409 if isinstance(exc, DraftConflictError) else 400
         message = (
             str(exc)
-            if type(exc) in (ValueError, DraftConflictError)
+            if type(exc) in (ValueError, DraftConflictError, MissingOpenAIKeyError)
             else "Invalid input; check fields."
         )
-    response = render(request, "error.html", message=message)
+    response = render(
+        request,
+        "error.html",
+        message=message,
+        openai_setup=isinstance(exc, MissingOpenAIKeyError),
+    )
     response.status_code = status
     return response
 

@@ -17,19 +17,27 @@ def read_env(path: Path) -> bytes | None:
     except FileNotFoundError:
         return None
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
-        raise ValueError("Use a regular .env file owned only by your OS account, not a link.")
+        raise ValueError(
+            "Use a regular .env file owned only by your OS account, not a link. No changes made."
+        )
     return path.read_bytes()
 
 
 def env_parts(content: bytes | None) -> tuple[list[str], bool]:
     """Preserve unrelated dotenv entries verbatim, including multiline values/comments."""
+    try:
+        text = (content or b"").decode("utf-8")
+    except UnicodeDecodeError:
+        raise ValueError(
+            "Existing .env is not valid UTF-8. No changes made; repair it first."
+        ) from None
     parts = []
     found = False
-    for entry in parse_stream(io.StringIO((content or b"").decode("utf-8"))):
+    for entry in parse_stream(io.StringIO(text)):
         if entry.error:
             raise ValueError("Existing .env could not be parsed. No changes made; repair it first.")
         if entry.key and entry.key.lower() == "openai_api_key":
-            found = True
+            found = found or bool(entry.value)
         else:
             parts.append(entry.original.string)
     return parts, found
@@ -38,7 +46,10 @@ def env_parts(content: bytes | None) -> tuple[list[str], bool]:
 def save_openai_key(path: Path, previous: bytes | None, key: str) -> None:
     """Replace only the OpenAI entry, committing a private file only after full write."""
     if not re.fullmatch(r"[A-Za-z0-9_-]+", key):
-        raise ValueError("Key must be a single token: letters, numbers, hyphens or underscores.")
+        raise ValueError(
+            "Key must be a single token: letters, numbers, hyphens or underscores. "
+            "No changes made."
+        )
     parts, _ = env_parts(previous)
     content = "".join(parts)
     if content and not content.endswith("\n"):

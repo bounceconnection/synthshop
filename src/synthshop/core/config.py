@@ -8,6 +8,10 @@ from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+class MissingOpenAIKeyError(ValueError):
+    """Vision was requested without a backend OpenAI key; guided setup applies."""
+
+
 class Settings(BaseSettings):
     """Local single-owner settings, supplied by environment or protected .env."""
 
@@ -31,7 +35,7 @@ class Settings(BaseSettings):
     def require_openai(self) -> str:
         """Fail without exposing a credential."""
         if not self.openai_api_key:
-            raise ValueError(
+            raise MissingOpenAIKeyError(
                 "OpenAI key is not set. Open Set up OpenAI in SynthShop for guided steps, "
                 "or run synthshop setup-openai in your launch terminal."
             )

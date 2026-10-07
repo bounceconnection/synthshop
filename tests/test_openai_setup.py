@@ -27,7 +27,9 @@ def invoke(answers="y\n"):
     return CliRunner().invoke(cli.app, ["setup-openai"], input=answers)
 
 
-def test_setup_persists_private_key_without_disclosure(terminal):
+@pytest.mark.parametrize("typed", [INERT, f" {INERT}\t"])
+def test_setup_persists_private_key_without_disclosure(terminal, monkeypatch, typed):
+    monkeypatch.setattr(cli.getpass, "getpass", lambda _prompt: typed)
     before = Settings()
     result = invoke()
     assert result.exit_code == 0, result.output
@@ -38,6 +40,41 @@ def test_setup_persists_private_key_without_disclosure(terminal):
     assert restarted.require_openai() == INERT
     assert restarted.readiness()["vision"]
     assert INERT not in restarted.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "placeholder", ["OPENAI_API_KEY=\n", "OPENAI_API_KEY\n", "OPENAI_API_KEY=''\n"]
+)
+def test_blank_placeholder_is_filled_without_replacement_prompt(terminal, placeholder):
+    terminal.write_text(placeholder + "REVERB_API_TOKEN=inert-reverb\n")
+    result = invoke("y\n")
+    assert result.exit_code == 0, result.output
+    assert terminal.read_text() == f"REVERB_API_TOKEN=inert-reverb\nOPENAI_API_KEY='{INERT}'\n"
+    assert Settings().require_openai() == INERT
+
+
+def test_setup_failures_report_distinct_reasons_without_disclosure(terminal, monkeypatch):
+    secret = "inert-secret-marker"
+    target = terminal.parent / "linked"
+    target.write_text(f"REVERB_API_TOKEN={secret}\n")
+    arrangements = [
+        lambda: terminal.symlink_to(target),
+        lambda: terminal.write_bytes(f"REVERB_API_TOKEN={secret}\xff\n".encode("latin-1")),
+        lambda: terminal.write_text(f'REVERB_API_TOKEN="{secret}'),
+        lambda: monkeypatch.setattr(cli.getpass, "getpass", lambda _prompt: f"{secret} !"),
+    ]
+    reasons = set()
+    for arrange in arrangements:
+        terminal.unlink(missing_ok=True)
+        arrange()
+        result = invoke()
+        assert result.exit_code == 1
+        assert secret not in result.output
+        assert "xff" not in result.output
+        reasons.add(result.output.strip().splitlines()[-1])
+    assert len(reasons) == len(arrangements)
+    assert not terminal.exists()
+    assert not list(terminal.parent.glob(".env-*"))
 
 
 def test_replacement_preserves_other_entries_and_handles_duplicate_case(terminal):
@@ -144,6 +181,14 @@ def test_setup_journey_and_missing_key_analysis_preserve_draft(application, draf
     assert response.status_code == 400
     assert 'href="/setup/openai"' in response.text
     assert application.store.load(draft.id) == draft
+    stale = client.post(
+        f"/drafts/{draft.id}/analyze",
+        data={"csrf": web.state.csrf, "revision": draft.revision + 1},
+        headers={"Origin": "http://127.0.0.1:8765"},
+    )
+    for unrelated, status in ((stale, 409), (client.get("/drafts/missing"), 404)):
+        assert unrelated.status_code == status
+        assert 'href="/setup/openai"' not in unrelated.text
     guidance = client.get("/setup/openai")
     assert guidance.status_code == 200
     assert "synthshop setup-openai" in guidance.text

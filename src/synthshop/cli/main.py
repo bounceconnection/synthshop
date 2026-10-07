@@ -57,7 +57,7 @@ def setup_openai() -> None:
             return
         with warnings.catch_warnings():
             warnings.simplefilter("error", getpass.GetPassWarning)
-            key = getpass.getpass("OpenAI API key (hidden; Enter cancels): ")
+            key = getpass.getpass("OpenAI API key (hidden; Enter cancels): ").strip()
         if not key:
             typer.echo("Cancelled. No changes made.")
             return
@@ -65,11 +65,14 @@ def setup_openai() -> None:
     except (EOFError, KeyboardInterrupt):
         typer.echo("\nCancelled. No changes made.")
         raise typer.Exit(1) from None
-    except (OSError, ValueError, getpass.GetPassWarning):
+    except ValueError as exc:
+        typer.echo(f"Could not save safely. {exc}")
+        raise typer.Exit(1) from None
+    except (OSError, getpass.GetPassWarning):
         typer.echo(
             "Could not save safely. No key was saved by this command. "
-            "Check that .env is valid UTF-8 dotenv, is not a link, and is writable; "
-            "use a terminal with hidden input and a single-token key."
+            "Check that .env and its directory are writable, "
+            "and use a terminal with hidden input."
         )
         raise typer.Exit(1) from None
     typer.echo(
