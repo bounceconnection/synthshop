@@ -12,6 +12,7 @@ import openai
 import pytest
 from PIL import Image
 
+from synthshop.core.config import MissingOpenAIKeyError
 from synthshop.core.models import Candidate
 from tests.test_cli import LOCAL, browser
 
@@ -241,7 +242,7 @@ def test_connection_failure_keeps_saved_draft(application, draft, openai_respons
 
 
 def test_missing_key_keeps_saved_draft(application, draft, respx_mock):
-    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+    with pytest.raises(MissingOpenAIKeyError):
         application.analyze(draft.id, draft.revision)
     assert application.store.load(draft.id) == draft
     assert not respx_mock.calls
