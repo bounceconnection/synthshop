@@ -27,6 +27,17 @@ IMAGE_HEADERS = {
 }
 
 
+def media_source(identity, url, relation: str) -> tuple[str, str, str, str]:
+    """Prefer a returned numeric ID, else a tagged hash of the exact returned locator."""
+    if not isinstance(url, str) or not url:
+        raise ValueError
+    if identity is None:
+        return "url-sha256", hashlib.sha256(url.encode()).hexdigest(), relation, url
+    if isinstance(identity, bool) or not str(identity).isdigit():
+        raise ValueError
+    return "id", str(identity), relation, url
+
+
 class ReverbAPIError(ValueError):
     """Sanitized provider failure; raw bodies can contain private account data."""
 
@@ -153,50 +164,23 @@ class ReverbClient:
             for photo in photos:
                 full = photo.get("_links", {}).get("full", {}).get("href")
                 url = photo.get("url") or full
-                if not isinstance(url, str) or not url or (full and full != url):
+                if full and full != url:
                     raise ValueError
-                identity = photo.get("id")
-                if identity is not None and (
-                    isinstance(identity, bool) or not str(identity).isdigit()
-                ):
-                    raise ValueError
-                sources.append(
-                    (
-                        "id" if identity is not None else "url-sha256",
-                        str(identity)
-                        if identity is not None
-                        else hashlib.sha256(url.encode()).hexdigest(),
-                        "full" if full else "url",
-                        url,
-                    )
-                )
+                sources.append(media_source(photo.get("id"), url, "full" if full else "url"))
             if len({row[:2] for row in sources}) != len(photos) or len(
                 {row[3] for row in sources}
             ) != len(photos):
                 raise ValueError
-            url = cover["href"]
-            if not isinstance(url, str) or not url:
-                raise ValueError
-            identity = cover.get("id")
-            if identity is not None and (isinstance(identity, bool) or not str(identity).isdigit()):
-                raise ValueError
-            sources.append(
-                (
-                    "id" if identity is not None else "url-sha256",
-                    str(identity)
-                    if identity is not None
-                    else hashlib.sha256(url.encode()).hexdigest(),
-                    "photo",
-                    url,
-                )
-            )
+            sources.append(media_source(cover.get("id"), cover["href"], "photo"))
             return sources
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
             raise ReverbAPIError("Remote photo/cover evidence is missing or ambiguous.") from exc
 
-    def photo_evidence(self, listing: dict) -> list[tuple[Representation, bytes]]:
+    def photo_evidence(
+        self, sources: list[tuple[str, str, str, str]]
+    ) -> list[tuple[Representation, bytes]]:
         """Fetch every selected representation under one fixed credential-free profile."""
-        return [self.fetch_photo(*source) for source in self.media_sources(listing)]
+        return [self.fetch_photo(*source) for source in sources]
 
     @staticmethod
     def fetch_photo(

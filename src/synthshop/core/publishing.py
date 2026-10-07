@@ -24,6 +24,18 @@ from synthshop.core.product_store import DraftConflictError
 from synthshop.integrations.reverb import NOT_CREATED, ReverbAPIError, ReverbClient
 from synthshop.integrations.staging import PhotoStaging
 
+FAILURES = (
+    httpx.HTTPError,
+    ValueError,
+    KeyError,
+    TypeError,
+    AttributeError,
+    IndexError,
+    OSError,
+    BotoCoreError,
+    ClientError,
+)
+
 
 def text_content(value: str) -> str:
     """Compare provider HTML normalization without accepting changed public words."""
@@ -84,11 +96,7 @@ class Publisher:
                 "Imported linked/non-draft product cannot become a fresh create. "
                 "Manage its existing listing on Reverb."
             )
-        if self.app.import_errors:
-            raise ValueError(
-                "Resolve failed legacy imports before publishing to prevent duplicates."
-            )
-        self.app.photos.verify(draft.photos)
+        self._local_sources(draft)
         return {
             "make": draft.make,
             "model": draft.model,
@@ -111,6 +119,14 @@ class Publisher:
             },
             "sku": f"synthshop-{draft.id}",
         }
+
+    def _local_sources(self, draft: Draft) -> None:
+        """Duplicate-import and derivative-tamper refusals need no provider data."""
+        if self.app.import_errors:
+            raise ValueError(
+                "Resolve failed legacy imports before publishing to prevent duplicates."
+            )
+        self.app.photos.verify(draft.photos)
 
     def fingerprint(self, draft: Draft, payload: dict) -> str:
         """Revision, complete fields/evidence, photo hashes/order and backend binding."""
@@ -215,17 +231,7 @@ class Publisher:
                     self.app.store.save_attempt(attempt)
                     self._refresh(client, draft, attempt)
                     return attempt
-                except (
-                    httpx.HTTPError,
-                    ValueError,
-                    KeyError,
-                    TypeError,
-                    AttributeError,
-                    IndexError,
-                    OSError,
-                    BotoCoreError,
-                    ClientError,
-                ) as exc:
+                except FAILURES as exc:
                     if attempt.state == "prepared":
                         self.app.store.release(attempt)
                         raise ValueError(
@@ -235,17 +241,34 @@ class Publisher:
                     self._failure(attempt)
                     raise ValueError(attempt.error) from exc
 
+    def _local(self, draft: Draft, attempt: Attempt, *, writes: bool) -> None:
+        """Refuse local/configuration drift before provider reads, keeping its own message."""
+        try:
+            if writes:
+                self.app.settings.require_processed_review_writes()
+            self._destination()
+            payload = attempt.approved_payload
+            if (
+                not payload
+                or attempt.revision != draft.revision
+                or self.fingerprint(draft, payload) != attempt.fingerprint
+            ):
+                raise DraftConflictError(
+                    "Original payload/revision/backend binding cannot be verified. Restore the "
+                    "original binding or use separately authorized recovery; no rebinding."
+                )
+            self._local_sources(draft)
+        except (ValueError, OSError):
+            self.app.store.invalidate_review(draft.id)
+            if attempt.state == "review_ready":
+                attempt.state = "remote"
+                self.app.store.save_attempt(attempt)
+            raise
+
     def _bound(self, client: ReverbClient, draft: Draft, attempt: Attempt) -> None:
         """Use stored approved fields, never silently adopt current references or destination."""
-        self._destination()
         shop = client.verify_shop()
-        payload = attempt.approved_payload
-        if (
-            not payload
-            or attempt.revision != draft.revision
-            or self.fingerprint(draft, payload) != attempt.fingerprint
-            or self.payload(draft, client.references()) != payload
-        ):
+        if self.payload(draft, client.references()) != attempt.approved_payload:
             raise DraftConflictError(
                 "Original payload/revision/backend binding cannot be verified."
             )
@@ -289,7 +312,7 @@ class Publisher:
         if attempt.observed_state != expected_state:
             raise ReverbAPIError("Unexpected remote state; no automatic publish or relist.")
         sources = client.media_sources(remote)
-        entities = client.photo_evidence(remote)
+        entities = client.photo_evidence(sources)
         if len(entities) != len(draft.photos) + 1:
             raise ReverbAPIError("Returned gallery is incomplete or contains additional photos.")
         after = self._observe(client, attempt)
@@ -346,6 +369,7 @@ class Publisher:
                 )
             self.app.snapshots.verify(attempt.snapshot)
             token = None
+            blocked = ""
             if (
                 attempt.state == "review_ready"
                 and not attempt.publish_intent_at
@@ -355,21 +379,28 @@ class Publisher:
                     self.app.store.invalidate_review(draft_id)
                     raise DraftConflictError("Configuration changed. Restore the original binding.")
                 self.app.photos.verify(draft.photos)
-                token = secrets.token_urlsafe(32)
-                self.app.store.review(
-                    draft,
-                    token,
-                    attempt.fingerprint,
-                    attempt.approved_payload,
-                    purpose="publish",
-                    snapshot=attempt.snapshot,
-                )
+                try:
+                    self.app.settings.require_processed_review_writes()
+                except ValueError as exc:
+                    self.app.store.invalidate_review(draft_id)
+                    blocked = str(exc)
+                else:
+                    token = secrets.token_urlsafe(32)
+                    self.app.store.review(
+                        draft,
+                        token,
+                        attempt.fingerprint,
+                        attempt.approved_payload,
+                        purpose="publish",
+                        snapshot=attempt.snapshot,
+                    )
             return {
                 "draft": draft,
                 "attempt": attempt,
                 "snapshot": attempt.snapshot,
                 "payload": attempt.approved_payload,
                 "token": token,
+                "blocked": blocked,
             }
 
     def decline(self, draft_id: str, revision: int) -> Attempt:
@@ -380,7 +411,7 @@ class Publisher:
             if not attempt:
                 raise KeyError("Attempt not found")
             self.app.store.invalidate_review(draft_id)
-            if not attempt.publish_intent_at and not attempt.live_observed:
+            if attempt.state == "review_ready" and not attempt.live_observed:
                 attempt.state = "remote"
                 attempt.error = "Review declined. Remote draft retained; correction is manual."
                 self.app.store.save_attempt(attempt)
@@ -393,8 +424,8 @@ class Publisher:
             attempt = self.app.store.attempt(draft_id)
             if not attempt or attempt.state != "review_ready" or attempt.publish_intent_at:
                 raise DraftConflictError("No unconsumed processed review. Use read-only status.")
+            self._local(draft, attempt, writes=True)
             try:
-                self.app.settings.require_processed_review_writes()
                 with ReverbClient(self.app.settings, authenticated=True) as client:
                     self._bound(client, draft, attempt)
                     self.app.snapshots.verify(attempt.snapshot)
@@ -413,17 +444,7 @@ class Publisher:
                     client.update(attempt.remote_id, {**attempt.approved_payload, "publish": True})
                     self._complete(client, draft, attempt)
                     return attempt
-            except (
-                httpx.HTTPError,
-                ValueError,
-                KeyError,
-                TypeError,
-                AttributeError,
-                IndexError,
-                OSError,
-                BotoCoreError,
-                ClientError,
-            ) as exc:
+            except FAILURES as exc:
                 self._failure(attempt)
                 raise ValueError(attempt.error) from exc
 
@@ -434,6 +455,7 @@ class Publisher:
             attempt = self.app.store.attempt(draft_id)
             if not attempt:
                 raise KeyError("Attempt not found")
+            self._local(draft, attempt, writes=False)
             try:
                 with ReverbClient(self.app.settings, authenticated=True) as client:
                     self._bound(client, draft, attempt)
@@ -447,17 +469,7 @@ class Publisher:
                         self.app.store.save_attempt(attempt)
                     self._refresh(client, draft, attempt)
                     return attempt
-            except (
-                httpx.HTTPError,
-                ValueError,
-                KeyError,
-                TypeError,
-                AttributeError,
-                IndexError,
-                OSError,
-                BotoCoreError,
-                ClientError,
-            ) as exc:
+            except FAILURES as exc:
                 self._failure(attempt)
                 raise ValueError(attempt.error) from exc
 

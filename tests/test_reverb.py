@@ -499,6 +499,45 @@ def test_readiness_gates_both_new_write_stages_but_not_status(publication, appli
     assert provider.creates == provider.updates == 1
 
 
+def test_disabled_readiness_offers_no_final_grant_and_keeps_its_reason(
+    publication, application, draft
+):
+    publisher, provider = publication
+    prepare(publisher, draft)
+    stale = publisher.processed_review(draft.id, draft.revision)["token"]
+    application.settings.reverb_processed_photo_review_confirmed = False
+    review = publisher.processed_review(draft.id, draft.revision)
+    assert review["token"] is None and "disabled" in review["blocked"]
+    client, _csrf = browser(application)
+    page = client.get(f"/drafts/{draft.id}/processed")
+    assert "disabled" in page.text and 'action="/drafts/' + draft.id + '/publish"' not in page.text
+    with pytest.raises(ValueError, match="disabled"):
+        publisher.publish(draft.id, draft.revision, stale)
+    assert application.store.attempt(draft.id).state == "remote"
+    application.settings.reverb_processed_photo_review_confirmed = True
+    with pytest.raises(ValueError):
+        publisher.publish(draft.id, draft.revision, stale)
+    assert provider.updates == 0
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [("missing", "Configure REVERB_API_TOKEN"), ("rotated", "Restore the original binding")],
+)
+def test_local_binding_refusal_never_downgrades_verified_publication(
+    publication, application, draft, change, message
+):
+    publisher, provider = publication
+    prepare(publisher, draft)
+    published = approve(publisher, draft)
+    application.settings.reverb_api_token = None if change == "missing" else "rotated"
+    with pytest.raises(ValueError, match=message):
+        publisher.reconcile(draft.id, draft.revision)
+    saved = application.store.attempt(draft.id)
+    assert saved.state == "published" and saved.url == published.url
+    assert provider.updates == 1
+
+
 @pytest.mark.parametrize(
     "evidence", ["id_only", "no_cover", "ambiguous_url", "duplicate", "invalid_id"]
 )
@@ -811,6 +850,34 @@ def test_old_state_migration_retains_history_and_never_manufactures_approval(
         assert saved.final_approval is None and saved.url is None
     assert provider.creates == 1
     assert provider.updates == (1 if state in ("creating", "remote") else 0)
+
+
+def test_decline_cannot_reopen_historical_publish_for_a_second_put(
+    publication, application, draft
+):
+    publisher, provider = publication
+    prepare(publisher, draft)
+    seed_old_attempt(application, draft, publisher, "publishing")
+    restarted = Publisher(Application(application.settings))
+    assert restarted.decline(draft.id, draft.revision).state == "historical_unverified"
+    with pytest.raises(ValueError):
+        restarted.reconcile(draft.id, draft.revision)
+    saved = restarted.app.store.attempt(draft.id)
+    assert saved.state == "historical_unverified" and saved.snapshot is None
+    saved.state = "remote"
+    with pytest.raises(ValueError):
+        restarted.app.store.save_attempt(saved)
+    assert provider.creates == 1 and provider.updates == 0
+
+
+def test_decline_leaves_an_uncertain_create_unchanged(publication, application, draft):
+    publisher, provider = publication
+    provider.timeout_create = True
+    with pytest.raises(ValueError):
+        prepare(publisher, draft)
+    assert publisher.decline(draft.id, draft.revision).state == "creating"
+    assert application.store.attempt(draft.id).state == "creating"
+    assert provider.creates == 1 and provider.updates == 0
 
 
 def test_unproven_historical_binding_cannot_be_adopted(publication, application, draft):

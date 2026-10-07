@@ -174,6 +174,11 @@ class DraftStore:
                     raise DraftConflictError("Consumed publication evidence is immutable.")
                 if previous.live_observed and not attempt.live_observed:
                     raise DraftConflictError("A live observation cannot reopen publication.")
+                if (
+                    previous.state == "historical_unverified"
+                    and attempt.state != "historical_unverified"
+                ):
+                    raise DraftConflictError("A historical attempt cannot reopen publication.")
             db.execute(
                 "INSERT OR REPLACE INTO attempts VALUES (?, ?)",
                 (attempt.draft_id, attempt.model_dump_json()),
