@@ -560,6 +560,40 @@ def test_reference_drift_is_explained_before_intent_and_never_unverifies_publica
     assert provider.updates == 1
 
 
+def test_reference_drift_never_blocks_historical_read_only_status(
+    publication, application, draft
+):
+    publisher, provider = publication
+    prepare(publisher, draft)
+    seed_old_attempt(application, draft, publisher, "published")
+    restarted = Publisher(Application(application.settings))
+    provider.remote["state"]["slug"] = "live"
+    provider.reference_data["categories"][0]["listable"] = False
+    with pytest.raises(ValueError, match="Historical write remains unverified"):
+        restarted.reconcile(draft.id, draft.revision)
+    historical = restarted.app.store.attempt(draft.id)
+    assert historical.state == "historical_unverified" and historical.observed_state == "live"
+    assert "Select an allowed" not in historical.error
+    assert provider.updates == 0
+
+
+def test_reference_drift_still_allows_read_only_sku_discovery(publication, application, draft):
+    publisher, provider = publication
+    provider.timeout_create = True
+    with pytest.raises(ValueError, match="Create outcome unknown"):
+        prepare(publisher, draft)
+    category = provider.reference_data["categories"][0]
+    category["listable"] = False
+    with pytest.raises(ValueError, match="Select an allowed Reverb condition and category"):
+        publisher.reconcile(draft.id, draft.revision)
+    discovered = application.store.attempt(draft.id)
+    assert discovered.state == "remote" and discovered.remote_id == "42"
+    assert discovered.snapshot is None
+    category["listable"] = True
+    assert publisher.reconcile(draft.id, draft.revision).state == "review_ready"
+    assert provider.creates == 1 and provider.updates == 0
+
+
 @pytest.mark.parametrize(
     "evidence", ["id_only", "no_cover", "ambiguous_url", "duplicate", "invalid_id"]
 )

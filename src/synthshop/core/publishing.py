@@ -275,19 +275,8 @@ class Publisher:
             raise
 
     def _bound(self, client: ReverbClient, draft: Draft, attempt: Attempt) -> None:
-        """Before intent, current references must still reproduce the approved fields.
-
-        A sent or live attempt is verified against its stored payload by _verify_fields only.
-        """
+        """Authenticated shop and stored preparation target; never silently rebind."""
         shop = client.verify_shop()
-        if (
-            not attempt.publish_intent_at
-            and not attempt.live_observed
-            and self.payload(draft, client.references()) != attempt.approved_payload
-        ):
-            raise DraftConflictError(
-                "Current Reverb reference data no longer reproduces the approved fields."
-            )
         target = self._target(draft, shop, historical=True)
         if attempt.preparation:
             bound = attempt.preparation.model_dump(exclude={"authorized_at", "historical"})
@@ -323,10 +312,21 @@ class Publisher:
         cache: bool,
         expected_state: str,
     ) -> tuple[ProcessedSnapshot, dict]:
-        """Sandwich entity reads with consistent metadata; not an atomic provider snapshot."""
+        """Sandwich entity reads with consistent metadata; not an atomic provider snapshot.
+
+        Only a draft capture can offer or consume a first-publish approval, so only it also
+        requires current references to reproduce the approved fields.
+        """
         remote = self._observe(client, attempt)
         if attempt.observed_state != expected_state:
             raise ReverbAPIError("Unexpected remote state; no automatic publish or relist.")
+        if (
+            expected_state == "draft"
+            and self.payload(draft, client.references()) != attempt.approved_payload
+        ):
+            raise DraftConflictError(
+                "Current Reverb reference data no longer reproduces the approved fields."
+            )
         sources = client.media_sources(remote)
         entities = client.photo_evidence(sources)
         if len(entities) != len(draft.photos) + 1:
