@@ -8,7 +8,9 @@ from urllib.parse import urlparse
 import httpx
 
 from synthshop.core.config import Settings
+from synthshop.core.models import Representation
 from synthshop.core.photos import MAX_BYTES, MAX_PHOTOS
+from synthshop.core.snapshots import decoded_metadata
 
 HEADERS = {
     "Accept": "application/hal+json",
@@ -18,6 +20,11 @@ HEADERS = {
     "X-Display-Currency": "USD",
 }
 NOT_CREATED = frozenset({401, 403, 422})
+IMAGE_HEADERS = {
+    "Accept": "image/jpeg, image/png;q=0.9, image/webp;q=0.8",
+    "Accept-Encoding": "identity",
+    "User-Agent": "SynthShop/processed-photo-review-1",
+}
 
 
 class ReverbAPIError(ValueError):
@@ -130,48 +137,72 @@ class ReverbClient:
         result = self.request("GET", f"listings/{listing_id}")
         return result.get("listing", result)
 
-    def photo_evidence(self, listing: dict) -> tuple[list[str], list[str]]:
-        """Hash served photos and cover; never infer identity from ingestion count.
+    @staticmethod
+    def media_sources(listing: dict) -> list[tuple[str, str, str, str]]:
+        """Exact returned gallery resources followed by the independent cover.
 
-        https://www.reverb-api.com/docs/updating-listing-images documents id/url.
-        Listing HAL full/photo links are also returned by the public v3 API.
-        Neither contract promises original bytes: transformed evidence must fail closed.
+        Locators exist only during authenticated backend reads. URL-based resource
+        identities are tagged hashes, never persisted or displayed signed links.
         """
         try:
             photos = listing["photos"]
-            cover = listing["_links"]["photo"]["href"]
+            cover = listing["_links"]["photo"]
             if not isinstance(photos, list) or not 1 <= len(photos) <= MAX_PHOTOS:
                 raise ValueError
-            identities, urls = [], []
+            sources = []
             for photo in photos:
                 full = photo.get("_links", {}).get("full", {}).get("href")
                 url = photo.get("url") or full
-                if not url or (full and full != url):
+                if not isinstance(url, str) or not url or (full and full != url):
                     raise ValueError
                 identity = photo.get("id")
                 if identity is not None and (
                     isinstance(identity, bool) or not str(identity).isdigit()
                 ):
                     raise ValueError
-                identities.append(str(identity) if identity is not None else url)
-                urls.append(url)
-            if len(set(identities)) != len(photos) or len(set(urls)) != len(photos):
+                sources.append(
+                    (
+                        "id" if identity is not None else "url-sha256",
+                        str(identity)
+                        if identity is not None
+                        else hashlib.sha256(url.encode()).hexdigest(),
+                        "full" if full else "url",
+                        url,
+                    )
+                )
+            if len({row[:2] for row in sources}) != len(photos) or len(
+                {row[3] for row in sources}
+            ) != len(photos):
                 raise ValueError
+            url = cover["href"]
+            if not isinstance(url, str) or not url:
+                raise ValueError
+            identity = cover.get("id")
+            if identity is not None and (isinstance(identity, bool) or not str(identity).isdigit()):
+                raise ValueError
+            sources.append(
+                (
+                    "id" if identity is not None else "url-sha256",
+                    str(identity)
+                    if identity is not None
+                    else hashlib.sha256(url.encode()).hexdigest(),
+                    "photo",
+                    url,
+                )
+            )
+            return sources
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
-            raise ReverbAPIError(
-                "Remote photo/cover evidence is missing or ambiguous; publication not verified."
-            ) from exc
-        digests = [self.photo_digest(url) for url in urls]
-        cover_digest = digests[0] if cover == urls[0] else self.photo_digest(cover)
-        if cover_digest != digests[0]:
-            raise ReverbAPIError("Remote cover differs from the first photo; not verified.")
-        return identities, digests
+            raise ReverbAPIError("Remote photo/cover evidence is missing or ambiguous.") from exc
+
+    def photo_evidence(self, listing: dict) -> list[tuple[Representation, bytes]]:
+        """Fetch every selected representation under one fixed credential-free profile."""
+        return [self.fetch_photo(*source) for source in self.media_sources(listing)]
 
     @staticmethod
-    def photo_digest(url: str) -> str:
-        """Bounded credential-free read of an exact returned image URL, without rewriting."""
-        if not isinstance(url, str):
-            raise ReverbAPIError("Unsupported remote photo URL; publication not verified.")
+    def fetch_photo(
+        identity_kind: str, identity: str, relation: str, url: str
+    ) -> tuple[Representation, bytes]:
+        """Bounded exact returned HTTPS entity; no redirects, cookies or negotiation drift."""
         parsed = urlparse(url)
         if (
             parsed.scheme != "https"
@@ -179,26 +210,38 @@ class ReverbClient:
             or parsed.fragment
         ):
             raise ReverbAPIError("Unsupported remote photo URL; publication not verified.")
-        digest = hashlib.sha256()
-        size = 0
+        content = bytearray()
         try:
-            # A separate client cannot leak the API token or reuse API/image cookies.
             with (
-                httpx.Client(timeout=35, follow_redirects=False, trust_env=False) as images,
+                httpx.Client(
+                    timeout=35, follow_redirects=False, trust_env=False, headers=IMAGE_HEADERS
+                ) as images,
                 images.stream("GET", url) as response,
             ):
-                if response.status_code != 200:
+                if (
+                    response.status_code != 200
+                    or response.headers.get("Content-Encoding", "identity").lower() != "identity"
+                ):
                     raise ReverbAPIError("Remote photo download is not verified.")
+                media_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
                 for chunk in response.iter_bytes():
-                    size += len(chunk)
-                    if size > MAX_BYTES:
+                    if len(content) + len(chunk) > MAX_BYTES:
                         raise ReverbAPIError("Remote photo exceeds the verification limit.")
-                    digest.update(chunk)
+                    content.extend(chunk)
         except httpx.HTTPError as exc:
             raise ReverbAPIError("Remote photo download is not verified.") from exc
-        if not size:
-            raise ReverbAPIError("Remote photo is empty; publication not verified.")
-        return digest.hexdigest()
+        data = bytes(content)
+        metadata = decoded_metadata(data, media_type)
+        return Representation(
+            identity_kind=identity_kind,
+            identity=identity,
+            relation=relation,
+            locator_digest=hashlib.sha256(url.encode()).hexdigest(),
+            digest=hashlib.sha256(data).hexdigest(),
+            byte_count=len(data),
+            media_type=media_type,
+            **metadata,
+        ), data
 
     def verify_ownership(self, listing: dict, sku: str) -> None:
         """Require both returned shop ownership and membership in authenticated own listings."""

@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     )
     expected_shop_id: str = "1333667"
     expected_shop_slug: str = "bounceconnection"
-    reverb_exact_photos_confirmed: bool = False
+    reverb_processed_photo_review_confirmed: bool = False
     data_dir: Path = Path.home() / ".synthshop"
     products_dir: Path = Path("products")
     r2_account_id: str | None = None
@@ -47,16 +47,16 @@ class Settings(BaseSettings):
             raise ValueError("Configure REVERB_API_TOKEN before review approval/publishing.")
         return self.reverb_api_token.get_secret_value()
 
-    def require_exact_photo_creates(self) -> None:
-        """New production drafts need operator-confirmed sandbox exact-photo/cover evidence.
-
-        An operator assertion, not proof: each listing still needs exact bytes, order and cover.
-        """
-        if "sandbox" not in self.reverb_base_url and not self.reverb_exact_photos_confirmed:
+    def require_processed_review_writes(self) -> None:
+        """Gate production create and first publish, never read-only reconciliation."""
+        if (
+            "sandbox" not in self.reverb_base_url
+            and not self.reverb_processed_photo_review_confirmed
+        ):
             raise ValueError(
-                "New production Reverb drafts are disabled. Set REVERB_EXACT_PHOTOS_CONFIRMED "
-                "only after separately authorized sandbox evidence shows exact full-photo and "
-                "cover bytes. Existing attempts can still be reconciled."
+                "Production preparation and publication are disabled. "
+                "REVERB_PROCESSED_PHOTO_REVIEW_CONFIRMED requires separately authorized "
+                "provider qualification and permission. Read-only status remains available."
             )
 
     def require_r2(self) -> tuple[str, str, str, str]:

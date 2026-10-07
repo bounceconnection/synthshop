@@ -5,7 +5,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
@@ -177,6 +177,30 @@ def create_app(settings: Settings | None = None, *, port: int = 8765) -> FastAPI
             raise KeyError("Photo missing")
         return FileResponse(path, media_type="image/jpeg")
 
+    @app.get("/drafts/{draft_id}/processed")
+    def processed(request: Request, draft_id: str):
+        draft = service.store.load(draft_id)
+        return render(
+            request,
+            "processed.html",
+            **publisher.processed_review(draft_id, draft.revision),
+        )
+
+    @app.get("/snapshots/{draft_id}/{snapshot_id}/{blob_id}")
+    def snapshot_image(draft_id: str, snapshot_id: str, blob_id: str):
+        attempt = service.store.attempt(draft_id)
+        if not attempt or not attempt.snapshot or attempt.snapshot.id != snapshot_id:
+            raise KeyError("Snapshot not found")
+        snapshot = attempt.snapshot
+        snapshot.verify()
+        entry = next(
+            (entry for entry in [*snapshot.gallery, snapshot.cover] if entry.blob_id == blob_id),
+            None,
+        )
+        if entry is None:
+            raise KeyError("Snapshot blob not found")
+        return Response(service.snapshots.read(entry), media_type=entry.media_type)
+
     @app.post("/drafts")
     async def intake(request: Request):
         form = await form_data(request)
@@ -248,12 +272,30 @@ def create_app(settings: Settings | None = None, *, port: int = 8765) -> FastAPI
         elif action == "review":
             context = await run_in_threadpool(publisher.review, draft_id, revision)
             return render(request, "review.html", **context)
+        elif action == "prepare":
+            if form.get("approval") != "prepare-unpublished":
+                raise ValueError(
+                    "Explicit authorization to prepare an unpublished draft is required."
+                )
+            await run_in_threadpool(
+                publisher.prepare,
+                draft_id,
+                revision,
+                str(form.get("token", "")),
+            )
+            return RedirectResponse(f"/drafts/{draft_id}/processed", status_code=303)
         elif action == "publish":
-            if form.get("approval") != "publish-exact-revision":
-                raise ValueError("Explicit approval of this exact revision is required.")
+            if form.get("approval") != "publish-reviewed-processed":
+                raise ValueError(
+                    "Explicit approval of this processed gallery and cover is required."
+                )
             await run_in_threadpool(
                 publisher.publish, draft_id, revision, str(form.get("token", ""))
             )
+        elif action == "status":
+            await run_in_threadpool(publisher.reconcile, draft_id, revision)
+        elif action == "decline":
+            await run_in_threadpool(publisher.decline, draft_id, revision)
         else:
             raise KeyError("Unknown action")
         return RedirectResponse(f"/drafts/{draft_id}", status_code=303)

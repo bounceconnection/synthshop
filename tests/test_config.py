@@ -37,7 +37,7 @@ def test_binding_covers_publishing_destination_and_staging_only():
         openai_api_key="test-only",
         data_dir="/elsewhere",
         products_dir="/legacy",
-        reverb_exact_photos_confirmed=True,
+        reverb_processed_photo_review_confirmed=True,
     )
     for change in (
         {"r2_bucket_name": "other"},
@@ -48,10 +48,14 @@ def test_binding_covers_publishing_destination_and_staging_only():
         assert binding() != binding(**change)
 
 
-def test_new_production_drafts_need_explicit_exact_photo_confirmation():
-    with pytest.raises(ValueError, match="REVERB_EXACT_PHOTOS_CONFIRMED"):
-        Settings(_env_file=None).require_exact_photo_creates()
-    Settings(_env_file=None, reverb_exact_photos_confirmed=True).require_exact_photo_creates()
+def test_production_writes_need_new_readiness_confirmation(monkeypatch):
+    monkeypatch.setenv("REVERB_EXACT_PHOTOS_CONFIRMED", "true")
+    settings = Settings(_env_file=None, reverb_exact_photos_confirmed=True)
+    with pytest.raises(ValueError):
+        settings.require_processed_review_writes()
+    Settings(
+        _env_file=None, reverb_processed_photo_review_confirmed=True
+    ).require_processed_review_writes()
     Settings(
         _env_file=None, reverb_base_url="https://sandbox.reverb.com/api"
-    ).require_exact_photo_creates()
+    ).require_processed_review_writes()

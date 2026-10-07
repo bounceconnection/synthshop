@@ -7,7 +7,15 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from synthshop.core.models import Attempt, Draft
+from synthshop.core.models import (
+    CONTRACT,
+    Attempt,
+    Draft,
+    FinalApproval,
+    PreparationGrant,
+    ProcessedSnapshot,
+    now,
+)
 
 
 class DraftConflictError(ValueError):
@@ -32,6 +40,55 @@ class DraftStore:
                 CREATE TABLE IF NOT EXISTS imports (path TEXT PRIMARY KEY, draft_id TEXT);
             """)
         self.database.chmod(0o600)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """One locked cutover: archive history, invalidate tokens, never reopen sent writes."""
+        with self.publish_lock(), self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("PRAGMA user_version").fetchone()[0] >= 1:
+                return
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS publication_history "
+                "(id TEXT PRIMARY KEY, body TEXT NOT NULL, review TEXT)"
+            )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(reviews)")}
+            for name in ("purpose", "snapshot_id", "manifest_digest", "contract"):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE reviews ADD COLUMN {name} TEXT")
+            for row in db.execute("SELECT id, body FROM attempts").fetchall():
+                old = json.loads(row["body"])
+                review = db.execute("SELECT * FROM reviews WHERE id=?", (row["id"],)).fetchone()
+                retained = dict(review) if review else None
+                if retained:
+                    retained.pop("token", None)
+                db.execute(
+                    "INSERT OR IGNORE INTO publication_history VALUES (?, ?, ?)",
+                    (row["id"], row["body"], json.dumps(retained)),
+                )
+                # Prepared is demonstrably unsent, and the cross-process lock is held.
+                if old["state"] == "prepared" and not old.get("remote_id"):
+                    db.execute("DELETE FROM attempts WHERE id=?", (row["id"],))
+                    continue
+                old.pop("image_ids", None)
+                old.pop("image_digests", None)
+                old["contract"] = "historical"
+                old["url"] = None
+                old["error"] = "Historical attempt: no processed-photo publication approval."
+                if old["state"] not in ("creating", "remote"):
+                    old["state"] = "historical_unverified"
+                if (
+                    review
+                    and review["fingerprint"] == old["fingerprint"]
+                    and review["revision"] == old["revision"]
+                ):
+                    old["approved_payload"] = json.loads(review["payload"])
+                migrated = Attempt.model_validate(old)
+                db.execute(
+                    "UPDATE attempts SET body=? WHERE id=?", (migrated.model_dump_json(), row["id"])
+                )
+            db.execute("DELETE FROM reviews")
+            db.execute("PRAGMA user_version=1")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -103,65 +160,141 @@ class DraftStore:
         return Attempt.model_validate_json(row[0]) if row else None
 
     def save_attempt(self, attempt: Attempt) -> None:
-        """Persist remote IDs before any further network operation."""
+        """Persist observations without allowing an intent or approved baseline to disappear."""
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT body FROM attempts WHERE id=?", (attempt.draft_id,)).fetchone()
+            if row:
+                previous = Attempt.model_validate_json(row[0])
+                if previous.publish_intent_at and (
+                    attempt.publish_intent_at != previous.publish_intent_at
+                    or attempt.final_approval != previous.final_approval
+                    or attempt.snapshot != previous.snapshot
+                ):
+                    raise DraftConflictError("Consumed publication evidence is immutable.")
+                if previous.live_observed and not attempt.live_observed:
+                    raise DraftConflictError("A live observation cannot reopen publication.")
             db.execute(
                 "INSERT OR REPLACE INTO attempts VALUES (?, ?)",
                 (attempt.draft_id, attempt.model_dump_json()),
             )
 
     def release(self, attempt: Attempt) -> None:
-        """Drop an attempt that never sent a create, so the owner can correct and re-approve."""
+        """Only a demonstrably unsent or definitely rejected create may release its slot."""
+        if attempt.state != "prepared" or attempt.remote_id or attempt.publish_intent_at:
+            raise DraftConflictError("A sent attempt cannot be released.")
         with self.connect() as db:
             db.execute("DELETE FROM attempts WHERE id=?", (attempt.draft_id,))
+            db.execute("DELETE FROM reviews WHERE id=?", (attempt.draft_id,))
 
-    def review(self, draft: Draft, token: str, fingerprint: str, payload: dict) -> None:
-        """Snapshot a review, not permission to write remotely."""
+    def invalidate_review(self, draft_id: str) -> None:
+        """Revocation is durable even if later evidence happens to revert."""
+        with self.connect() as db:
+            db.execute("DELETE FROM reviews WHERE id=?", (draft_id,))
+
+    def review(
+        self,
+        draft: Draft,
+        token: str,
+        fingerprint: str,
+        payload: dict,
+        *,
+        purpose: str,
+        snapshot: ProcessedSnapshot | None = None,
+    ) -> None:
+        """Persist a purpose-bound challenge, never remote-write permission."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             current = db.execute("SELECT revision FROM drafts WHERE id=?", (draft.id,)).fetchone()
             if not current or current[0] != draft.revision:
                 raise DraftConflictError("Draft changed during review. Reload.")
             db.execute(
-                "INSERT OR REPLACE INTO reviews VALUES (?, ?, ?, ?, ?)",
-                (draft.id, token, draft.revision, fingerprint, json.dumps(payload)),
+                "INSERT OR REPLACE INTO reviews "
+                "(id,token,revision,fingerprint,payload,purpose,snapshot_id,manifest_digest,contract) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    draft.id,
+                    token,
+                    draft.revision,
+                    fingerprint,
+                    json.dumps(payload),
+                    purpose,
+                    snapshot.id if snapshot else None,
+                    snapshot.digest if snapshot else None,
+                    CONTRACT,
+                ),
             )
 
-    def claim(self, draft: Draft, token: str, fingerprint: str) -> Attempt:
-        """Approval and attempt reservation are one transaction; no duplicate POST slot."""
+    @staticmethod
+    def _challenge(
+        db: sqlite3.Connection, draft: Draft, token: str, fingerprint: str, purpose: str
+    ) -> sqlite3.Row:
+        review = db.execute("SELECT * FROM reviews WHERE id=?", (draft.id,)).fetchone()
+        current = db.execute("SELECT revision FROM drafts WHERE id=?", (draft.id,)).fetchone()
+        if (
+            not review
+            or not token
+            or review["token"] != token
+            or review["fingerprint"] != fingerprint
+            or review["purpose"] != purpose
+            or review["revision"] != draft.revision
+            or not current
+            or review["contract"] != CONTRACT
+            or current[0] != draft.revision
+        ):
+            raise DraftConflictError("Approval is missing, stale or for a different purpose.")
+        return review
+
+    def claim(
+        self, draft: Draft, token: str, fingerprint: str, preparation: PreparationGrant
+    ) -> Attempt:
+        """Preparation grant and the sole create reservation are one transaction."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            review = db.execute("SELECT * FROM reviews WHERE id=?", (draft.id,)).fetchone()
-            current = db.execute("SELECT revision FROM drafts WHERE id=?", (draft.id,)).fetchone()
-            if (
-                not review
-                or review["token"] != token
-                or review["fingerprint"] != fingerprint
-                or review["revision"] != draft.revision
-                or current[0] != draft.revision
-            ):
-                raise DraftConflictError(
-                    "Approval is missing or stale. Review the exact current revision."
-                )
-            row = db.execute("SELECT body FROM attempts WHERE id=?", (draft.id,)).fetchone()
-            if row:
-                attempt = Attempt.model_validate_json(row[0])
-                if attempt.state != "prepared":
-                    if attempt.fingerprint != fingerprint:
-                        raise DraftConflictError(
-                            "Environment changed after attempt. Restore it to reconcile."
-                        )
-                    return attempt
+            review = self._challenge(db, draft, token, fingerprint, "prepare")
+            if db.execute("SELECT 1 FROM attempts WHERE id=?", (draft.id,)).fetchone():
+                raise DraftConflictError("Attempt already exists; use read-only status.")
             attempt = Attempt(
                 draft_id=draft.id,
                 revision=draft.revision,
                 correlation=f"synthshop-{draft.id}",
                 fingerprint=fingerprint,
+                approved_payload=json.loads(review["payload"]),
+                preparation=preparation,
             )
+            db.execute("INSERT INTO attempts VALUES (?, ?)", (draft.id, attempt.model_dump_json()))
+            db.execute("DELETE FROM reviews WHERE id=?", (draft.id,))
+            return attempt
+
+    def claim_publish(self, draft: Draft, token: str, expected: Attempt) -> Attempt:
+        """Consume final approval and persist intent atomically BEFORE at most one PUT."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            review = self._challenge(db, draft, token, expected.fingerprint, "publish")
+            row = db.execute("SELECT body FROM attempts WHERE id=?", (draft.id,)).fetchone()
+            attempt = Attempt.model_validate_json(row[0]) if row else None
+            if (
+                attempt != expected
+                or attempt.state != "review_ready"
+                or attempt.publish_intent_at
+                or attempt.live_observed
+                or attempt.contract != CONTRACT
+                or not attempt.snapshot
+                or review["snapshot_id"] != attempt.snapshot.id
+                or review["manifest_digest"] != attempt.snapshot.digest
+            ):
+                raise DraftConflictError("Processed approval changed or was already consumed.")
+            attempt.snapshot.verify()
+            attempt.final_approval = FinalApproval(
+                snapshot_id=attempt.snapshot.id,
+                manifest_digest=attempt.snapshot.digest,
+            )
+            attempt.publish_intent_at = now()
+            attempt.state = "publishing"
             db.execute(
-                "INSERT OR REPLACE INTO attempts VALUES (?, ?)",
-                (draft.id, attempt.model_dump_json()),
+                "UPDATE attempts SET body=? WHERE id=?", (attempt.model_dump_json(), draft.id)
             )
+            db.execute("DELETE FROM reviews WHERE id=?", (draft.id,))
             return attempt
 
     @contextmanager
