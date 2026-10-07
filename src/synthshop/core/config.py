@@ -31,7 +31,10 @@ class Settings(BaseSettings):
     def require_openai(self) -> str:
         """Fail without exposing a credential."""
         if not self.openai_api_key:
-            raise ValueError("Configure OPENAI_API_KEY in backend .env to analyze photos.")
+            raise ValueError(
+                "OpenAI key is not set. Open Set up OpenAI in SynthShop for guided steps, "
+                "or run synthshop setup-openai in your launch terminal."
+            )
         return self.openai_api_key.get_secret_value()
 
     def require_reverb(self) -> str:

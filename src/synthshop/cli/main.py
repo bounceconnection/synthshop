@@ -1,5 +1,9 @@
 """Typer launcher; publication exists only in the reviewed local UI."""
 
+import getpass
+import os
+import sys
+import warnings
 import webbrowser
 from pathlib import Path
 from threading import Timer
@@ -10,6 +14,7 @@ import uvicorn
 from rich.console import Console
 
 from synthshop.core.config import Settings
+from synthshop.core.openai_setup import env_parts, read_env, save_openai_key
 from synthshop.web.app import create_app
 
 app = typer.Typer(
@@ -22,6 +27,57 @@ app = typer.Typer(
 @app.callback()
 def main() -> None:
     """Local photo-to-Reverb drafting and explicit review."""
+
+
+@app.command()
+def setup_openai() -> None:
+    """Save an OpenAI key with hidden input in this launch directory's .env."""
+    path = Path.cwd() / ".env"
+    typer.echo(f"OpenAI setup for {path}")
+    typer.echo("Run here only if this is the directory you use for synthshop serve.")
+    typer.echo("Get an API key at https://platform.openai.com/api-keys.")
+    typer.echo("No API request is made. Never put the key in a command or browser form.")
+    if not sys.stdin.isatty():
+        typer.echo("Open a local interactive terminal to use hidden input. No changes made.")
+        raise typer.Exit(1)
+    if any(name.lower() == "openai_api_key" for name in os.environ):
+        typer.echo(
+            "OPENAI_API_KEY is set in this process environment and overrides .env. "
+            "Remove that override in your launch terminal before setup. No changes made."
+        )
+        raise typer.Exit(1)
+    try:
+        previous = read_env(path)
+        _, existing = env_parts(previous)
+        if not typer.confirm("Save to this .env?", default=False):
+            typer.echo("Cancelled. No changes made.")
+            return
+        if existing and not typer.confirm("Replace the existing OpenAI key?", default=False):
+            typer.echo("Cancelled. Existing key kept.")
+            return
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            key = getpass.getpass("OpenAI API key (hidden; Enter cancels): ")
+        if not key:
+            typer.echo("Cancelled. No changes made.")
+            return
+        save_openai_key(path, previous, key)
+    except (EOFError, KeyboardInterrupt):
+        typer.echo("\nCancelled. No changes made.")
+        raise typer.Exit(1) from None
+    except (OSError, ValueError, getpass.GetPassWarning):
+        typer.echo(
+            "Could not save safely. No key was saved by this command. "
+            "Check that .env is valid UTF-8 dotenv, is not a link, and is writable; "
+            "use a terminal with hidden input and a single-token key."
+        )
+        raise typer.Exit(1) from None
+    typer.echo(
+        "Saved OpenAI key to .env with owner-only permissions. Authentication not tested.\n"
+        "Restart synthshop serve from this same directory with your usual options; "
+        "open its new unlock link. Vision should show Configured (presence only).\n"
+        "Analyze sends photos to OpenAI and may incur API charges only when you choose it."
+    )
 
 
 @app.command()

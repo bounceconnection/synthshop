@@ -157,6 +157,10 @@ def create_app(settings: Settings | None = None, *, port: int = 8765) -> FastAPI
             import_errors=service.import_errors,
         )
 
+    @app.get("/setup/openai", response_class=HTMLResponse)
+    def openai_setup(request: Request):
+        return render(request, "openai_setup.html")
+
     @app.get("/style.css")
     def stylesheet():
         return FileResponse(Path(__file__).parent / "style.css", media_type="text/css")

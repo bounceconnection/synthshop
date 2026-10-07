@@ -12,8 +12,7 @@ Python 3.11+ on macOS or Linux:
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env
-chmod 600 .env
+synthshop setup-openai  # optional: hidden terminal prompt for photo analysis
 synthshop serve
 ```
 
@@ -22,6 +21,45 @@ The launcher prints a one-time unlock link (`http://127.0.0.1:8765/unlock?key=�
 Redeeming the link sets a browser session cookie; it works once per launch. Requests without that session, including other local accounts that can reach the port, get no drafts, photos, review or publish actions. Wrong or already-used links are refused. Restart `synthshop serve` for a new link, for example after clearing cookies or switching browsers. This does not protect against software running as your own OS user.
 
 Managed storage defaults to `~/.synthshop`. Use `--data-dir /absolute/private/dedicated-directory` or `DATA_DIR` to change it. Do not point it at a shared/general-purpose directory: SynthShop restricts that directory to the current OS user. The old `identify`, `publish --live`, `sold`, and `unpublish` commands were removed; there is no CLI approval bypass or separate publishing workflow. Manage existing listing endings/sales on Reverb itself.
+
+### Set up OpenAI photo analysis
+
+Click **Set up OpenAI** in Backend readiness or beside the draft's analysis action for
+the in-app guide. No credential is collected in the browser.
+
+1. Save draft edits and stop your normal app with Ctrl-C in its launch terminal.
+2. Get a key from [OpenAI API keys](https://platform.openai.com/api-keys).
+   API billing is separate from a ChatGPT subscription.
+3. In that same directory and activated Python environment, run `synthshop setup-openai`.
+   Do **not** append your key to the command. Confirm the displayed `.env` destination,
+   then paste only at the hidden terminal prompt and press Enter; no characters echo.
+4. Restart `synthshop serve` from the same directory with your usual port/storage options.
+   Open the launcher's **new unlock link**. Vision should show **Configured**.
+
+Setup makes no API request and does not test authentication, credit or model access.
+Only choosing Analyze sends photos to OpenAI and can incur charges. Manual editing
+remains available without a key.
+
+The command creates or updates only `OPENAI_API_KEY` in the launch directory's `.env`,
+atomically and with owner-only permissions (`0600`). Other entries remain intact.
+Replacing an existing key requires confirmation. Empty secret input, declining a
+confirmation, or Ctrl-C leaves the original file unchanged. Malformed/non-UTF-8
+dotenv files and linked files are refused rather than rewritten; write failures
+leave the original configuration intact.
+
+The launch directory—not `--data-dir`—determines which `.env` is read. Environment
+variables take precedence: setup refuses to save if `OPENAI_API_KEY` is already
+set in the terminal environment, even when empty. Remove that override from the
+normal launch terminal before setup. Restart after saving; refreshing a running
+app does not reload settings. Keep `.env` out of source control; never put a key
+in chat, command arguments, shell history, screenshots or browser forms.
+
+**Offline/test launchers are separate.** A publishing-validation fixture may use
+a fresh HOME/environment, fake Reverb/R2 clients and intentionally no vision key,
+or ignore `.env`. Do not add real credentials or enable real providers there.
+Use the guide in your normal app environment; fixture badges do not prove real
+account readiness.
+
 
 ## Workflow
 
@@ -144,4 +182,4 @@ python -m build
 
 Tests isolate storage and credentials; no live API keys are required. Keep tests focused on owner precedence, money/evidence boundaries, stale approval, persistence, migration, security and uncertain remote outcomes—not provider mock echoes as compatibility evidence.
 
-Core application services live in `core/application.py` and `core/publishing.py`; FastAPI/Jinja routes live in `web/`; Typer only launches the local UI. There is no native app, multi-user hosting, storefront/Stripe checkout, cross-posting, order management or generalized scraping platform.
+Core application services live in `core/application.py` and `core/publishing.py`; FastAPI/Jinja routes live in `web/`; Typer launches the local UI and provides hidden-input OpenAI key setup. There is no native app, multi-user hosting, storefront/Stripe checkout, cross-posting, order management or generalized scraping platform.

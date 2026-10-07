@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="eyebrow">LOCAL SETUP / OPENAI PHOTO ANALYSIS</div>
+<h1>Set up OpenAI</h1>
+<section class="card">
+<h2>{{ 'Key configured in this running app' if ready.vision else 'No key configured in this running app' }}</h2>
+<p>Readiness checks presence only, not authentication, account credit or model access. Setup does not contact OpenAI or spend money.</p>
+<ol>
+<li><p>Save any draft edits. In the terminal running your normal SynthShop app, press <kbd>Ctrl-C</kbd> to stop it. Your saved drafts and photos remain local.</p></li>
+<li><p>Create or copy an API key from <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">OpenAI API keys</a>. API billing is separate from a ChatGPT subscription.</p></li>
+<li><p>In that same terminal and directory, with the same Python environment activated, run this command <strong>without adding your key</strong>:</p><pre><code>synthshop setup-openai</code></pre>
+<p>Confirm the displayed destination. Paste the key only at the terminal's hidden prompt, then press Enter. Nothing appears while you paste. Empty input or Ctrl-C cancels. Replacing an existing OpenAI key needs confirmation.</p>
+<p>The command saves only the OpenAI entry in the launch directory's <code>.env</code>, with owner-only file permissions; other settings stay intact. Never enter credentials in this browser, chat, command arguments or source control.</p></li>
+<li><p>Restart from the same directory using <code>synthshop serve</code> with your usual options (such as <code>--port</code> and <code>--data-dir</code>). Open the <strong>new unlock link</strong> printed by that launcher; this old browser session cannot unlock the restarted app.</p></li>
+<li><p>Backend readiness should now show vision <strong>Configured</strong>. Only choose Analyze when you want to send the item's photos to OpenAI; analysis may incur API charges. A configured badge does not prove the key works.</p></li>
+</ol>
+</section>
+<section class="card"><h2>Still not configured?</h2>
+<p>The app reads <code>.env</code> from the directory where you launch it, not from <code>--data-dir</code>. Restart after saving; refreshing this old process does not reload credentials. A process-level <code>OPENAI_API_KEY</code> overrides <code>.env</code>; setup refuses to save while that override is set. Remove it in your normal launch terminal before rerunning setup.</p>
+<p><strong>Offline / test launcher?</strong> A publishing-validation app may deliberately use a fresh HOME/environment, fake Reverb/R2 clients and no vision key, or ignore <code>.env</code>. Do not put real credentials in that fixture or enable its real providers. Follow these steps only in your normal app environment. Test badges are not real-account readiness.</p>
+<p>Manual identification and editing remain available without a key.</p></section>
+<a class="button" href="/">Return to saved drafts</a>
+{% endblock %}
