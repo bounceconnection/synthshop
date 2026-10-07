@@ -23,6 +23,12 @@ def test_restart_preserves_photos_facts_and_revision(application, draft):
     assert changed.revision == draft.revision + 1
 
 
+def test_duplicate_server_starts_while_a_workflow_holds_the_publish_lock(application, draft):
+    with application.store.publish_lock():
+        duplicate = Application(application.settings)
+    assert duplicate.store.load(draft.id).model_dump() == draft.model_dump()
+
+
 def attempt(draft, state):
     return Attempt(
         draft_id=draft.id,

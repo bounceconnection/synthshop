@@ -467,9 +467,10 @@ def test_ambiguous_create_empty_lookup_then_discovery_never_reposts(
 ):
     publisher, provider = publication
     provider.timeout_create = True
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Create outcome unknown"):
         prepare(publisher, draft)
-    assert application.store.attempt(draft.id).state == "creating"
+    unknown = application.store.attempt(draft.id)
+    assert unknown.state == "creating" and unknown.error.startswith("Create outcome unknown")
     provider.empty_lookup = True
     restarted = Publisher(Application(application.settings))
     with pytest.raises(ValueError):
@@ -535,6 +536,27 @@ def test_local_binding_refusal_never_downgrades_verified_publication(
         publisher.reconcile(draft.id, draft.revision)
     saved = application.store.attempt(draft.id)
     assert saved.state == "published" and saved.url == published.url
+    assert provider.updates == 1
+
+
+def test_reference_drift_is_explained_before_intent_and_never_unverifies_publication(
+    publication, application, draft
+):
+    publisher, provider = publication
+    prepare(publisher, draft)
+    final = publisher.processed_review(draft.id, draft.revision)
+    category = provider.reference_data["categories"][0]
+    category["listable"] = False
+    with pytest.raises(ValueError, match="Select an allowed Reverb condition and category"):
+        publisher.publish(draft.id, draft.revision, final["token"])
+    saved = application.store.attempt(draft.id)
+    assert saved.state == "remote" and "Select an allowed Reverb" in saved.error
+    category["listable"] = True
+    assert publisher.reconcile(draft.id, draft.revision).state == "review_ready"
+    published = approve(publisher, draft)
+    category["listable"] = False
+    result = publisher.reconcile(draft.id, draft.revision)
+    assert result.state == "published" and result.url == published.url
     assert provider.updates == 1
 
 
@@ -679,27 +701,42 @@ def test_browser_two_unchecked_grants_and_status_is_read_only(publication, appli
 def test_definite_rejection_only_can_reopen_create(publication, application, draft, status):
     publisher, provider = publication
     provider.reject_create = status
-    with pytest.raises(ValueError):
+    definite = status in (401, 403, 422)
+    outcome = "No listing was created" if definite else "Create outcome unknown"
+    with pytest.raises(ValueError, match=outcome + ".*Reverb POST failed"):
         prepare(publisher, draft)
     provider.reject_create = None
-    if status in (401, 403, 422):
+    if definite:
         assert application.store.attempt(draft.id) is None
         assert prepare(publisher, draft).state == "review_ready"
         assert provider.creates == 2
     else:
         assert application.store.attempt(draft.id).state == "creating"
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Create outcome unknown.*Exact-SKU lookup"):
             publisher.reconcile(draft.id, draft.revision)
         assert provider.creates == 1
     assert provider.updates == 0
 
 
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        (
+            ClientError({"Error": {"Code": "AccessDenied"}}, "GetBucketLifecycle"),
+            "No listing was created; correct configuration",
+        ),
+        (
+            ValueError("Image staging needs an existing enabled one-day expiry."),
+            "No listing was created.*one-day expiry",
+        ),
+    ],
+)
 def test_precreate_failure_and_abandoned_prepared_slot_allow_fresh_review(
-    publication, application, draft
+    publication, application, draft, failure, message
 ):
     publisher, provider = publication
-    Staging.failure = ClientError({"Error": {"Code": "AccessDenied"}}, "GetBucketLifecycle")
-    with pytest.raises(ValueError):
+    Staging.failure = failure
+    with pytest.raises(ValueError, match=message):
         prepare(publisher, draft)
     assert application.store.attempt(draft.id) is None
     Staging.failure = None

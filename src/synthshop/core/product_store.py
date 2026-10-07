@@ -44,6 +44,9 @@ class DraftStore:
 
     def _migrate(self) -> None:
         """One locked cutover: archive history, invalidate tokens, never reopen sent writes."""
+        with self.connect() as db:
+            if db.execute("PRAGMA user_version").fetchone()[0] >= 1:
+                return
         with self.publish_lock(), self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("PRAGMA user_version").fetchone()[0] >= 1:

@@ -37,6 +37,12 @@ FAILURES = (
 )
 
 
+def with_reason(outcome: str, exc: Exception) -> str:
+    """Append only this application's own sanitized refusal text, never library/provider bodies."""
+    detail = str(exc) if type(exc) in (ValueError, ReverbAPIError, DraftConflictError) else ""
+    return f"{outcome} {detail}".strip()
+
+
 def text_content(value: str) -> str:
     """Compare provider HTML normalization without accepting changed public words."""
     return " ".join(html.unescape(re.sub(r"<[^>]*>", " ", value)).split())
@@ -235,10 +241,13 @@ class Publisher:
                     if attempt.state == "prepared":
                         self.app.store.release(attempt)
                         raise ValueError(
-                            "No listing was created. Correct configuration or fields, "
-                            "then review and authorize preparation again."
+                            with_reason(
+                                "No listing was created; correct configuration or fields, "
+                                "then review and authorize preparation again.",
+                                exc,
+                            )
                         ) from exc
-                    self._failure(attempt)
+                    self._failure(attempt, exc)
                     raise ValueError(attempt.error) from exc
 
     def _local(self, draft: Draft, attempt: Attempt, *, writes: bool) -> None:
@@ -266,11 +275,18 @@ class Publisher:
             raise
 
     def _bound(self, client: ReverbClient, draft: Draft, attempt: Attempt) -> None:
-        """Use stored approved fields, never silently adopt current references or destination."""
+        """Before intent, current references must still reproduce the approved fields.
+
+        A sent or live attempt is verified against its stored payload by _verify_fields only.
+        """
         shop = client.verify_shop()
-        if self.payload(draft, client.references()) != attempt.approved_payload:
+        if (
+            not attempt.publish_intent_at
+            and not attempt.live_observed
+            and self.payload(draft, client.references()) != attempt.approved_payload
+        ):
             raise DraftConflictError(
-                "Original payload/revision/backend binding cannot be verified."
+                "Current Reverb reference data no longer reproduces the approved fields."
             )
         target = self._target(draft, shop, historical=True)
         if attempt.preparation:
@@ -445,7 +461,7 @@ class Publisher:
                     self._complete(client, draft, attempt)
                     return attempt
             except FAILURES as exc:
-                self._failure(attempt)
+                self._failure(attempt, exc)
                 raise ValueError(attempt.error) from exc
 
     def reconcile(self, draft_id: str, revision: int) -> Attempt:
@@ -462,7 +478,9 @@ class Publisher:
                     if not attempt.remote_id:
                         matches = client.own_listings(attempt.correlation)
                         if len(matches) != 1 or not str(matches[0].get("id", "")).isdigit():
-                            raise ReverbAPIError("Create outcome unknown; no second create.")
+                            raise ReverbAPIError(
+                                "Exact-SKU lookup did not find exactly one owned listing."
+                            )
                         attempt.remote_id = str(matches[0]["id"])
                         if attempt.state == "creating":
                             attempt.state = "remote"
@@ -470,7 +488,7 @@ class Publisher:
                     self._refresh(client, draft, attempt)
                     return attempt
             except FAILURES as exc:
-                self._failure(attempt)
+                self._failure(attempt, exc)
                 raise ValueError(attempt.error) from exc
 
     def _complete(self, client: ReverbClient, draft: Draft, attempt: Attempt) -> None:
@@ -507,28 +525,31 @@ class Publisher:
             )
             self.app.store.save_attempt(attempt)
 
-    def _failure(self, attempt: Attempt) -> None:
-        """Clear success without erasing evidence or ever promising a failed write was private."""
+    def _failure(self, attempt: Attempt, exc: Exception) -> None:
+        """Clear success and record a sanitized reason; never promise a failed write was private."""
         self.app.store.invalidate_review(attempt.draft_id)
         attempt.url = None
         if attempt.state == "historical_unverified":
-            attempt.error = (
-                "Historical write remains unverified; no retroactive approval or replay."
-            )
+            outcome = "Historical write remains unverified; no retroactive approval or replay."
         elif attempt.publish_intent_at or attempt.live_observed:
             attempt.state = "published_unverified"
-            attempt.error = (
+            outcome = (
                 "Last observed live; reviewed evidence not verified. It may be publicly visible."
                 if attempt.observed_state == "live"
                 else "Publication outcome unknown; it may be live. No publish replay is allowed."
             )
+        elif not attempt.remote_id:
+            outcome = (
+                "Create outcome unknown; a remote draft may exist. No second create will be sent "
+                "after an uncertain response. Check status for a read-only exact-SKU lookup."
+            )
         else:
-            if attempt.remote_id:
-                attempt.state = "remote"
-            attempt.error = (
+            attempt.state = "remote"
+            outcome = (
                 "Remote draft/evidence not reviewable or approval invalidated. Check status for "
                 "a fresh capture and review again. No second create; correction is manual."
             )
+        attempt.error = with_reason(outcome, exc)
         self.app.store.save_attempt(attempt)
 
     @staticmethod
