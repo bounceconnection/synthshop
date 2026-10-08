@@ -11,6 +11,7 @@ from synthshop.core.photos import MAX_PHOTOS, PhotoLibrary
 from synthshop.core.pricing import from_reverb, recommendation
 from synthshop.core.product_store import DraftConflictError, DraftStore
 from synthshop.core.snapshots import SnapshotLibrary
+from synthshop.core.validation import DraftFieldError
 from synthshop.integrations.openai_vision import identify_from_photos
 from synthshop.integrations.reverb import ReverbClient
 
@@ -69,29 +70,64 @@ class Application:
         return self.save(draft, revision)
 
     def save(self, draft: Draft, revision: int | None) -> Draft:
+        """Persist through the revision check after pricing follows the recommendation."""
+        return self.store.save(self.follow_recommendation(draft), revision)
+
+    @staticmethod
+    def follow_recommendation(draft: Draft) -> Draft:
         """Price and reasoning the owner has not changed follow the current recommendation."""
         pricing = recommendation(draft)
         if "price" not in draft.owner_fields:
             draft.price = pricing["ask"]
         if "price_reason" not in draft.owner_fields:
             draft.price_reason = pricing["rationale"] if pricing["ask"] else ""
-        return self.store.save(draft, revision)
+        return draft
 
     def edit(self, draft_id: str, revision: int, fields: dict) -> Draft:
         """Owner corrections win, including explicit nonfunctioning/poor condition."""
-        draft = self.current(draft_id, revision)
+        draft, errors = self.prepare_edit(self.current(draft_id, revision), fields)
+        if errors:
+            raise DraftFieldError(errors)
+        return self.save(draft, revision)
+
+    def prepare_edit(self, draft: Draft, fields: dict) -> tuple[Draft, dict[str, str]]:
+        """Build an unsaved candidate, collecting independent field errors together."""
+        errors = {}
         for name in EDITABLE:
-            if name in fields:
+            if name not in fields:
+                continue
+            try:
                 value = owner_text(fields[name])
                 changed = value != getattr(draft, name)
-                if changed:
-                    setattr(draft, name, value)
+                setattr(draft, name, value)
                 if (changed or value) and name not in draft.owner_fields:
                     draft.owner_fields.append(name)
-        self.own_pricing(draft, fields)
+            except ValueError as exc:
+                errors[name] = str(exc)
+        for name in ("price", "price_reason"):
+            if name in fields:
+                try:
+                    self.own_pricing(draft, {name: fields[name]})
+                except ValueError as exc:
+                    errors[name] = str(exc)
         draft.offers_enabled = fields.get("offers_enabled") in (True, "on", "true")
+        try:
+            draft.shipping = self.shipping_rates(str(fields.get("international_rates", "")))
+        except ValueError as exc:
+            errors["international_rates"] = str(exc)
+        draft.title = draft.title or " ".join(
+            filter(None, [draft.make, draft.model, draft.variant])
+        )
+        if len(draft.title) > 255:
+            errors["title"] = "Title must be at most 255 characters."
+        draft.description = draft.description or self.factual_copy(draft)
+        return self.follow_recommendation(draft), errors
+
+    @staticmethod
+    def shipping_rates(text: str) -> list[ShippingRate]:
+        """Parse the existing explicit CODE=amount shipping contract."""
         rates = [ShippingRate()]
-        for line in str(fields.get("international_rates", "")).splitlines():
+        for line in text.splitlines():
             if line.strip():
                 code, separator, amount = line.partition("=")
                 code = code.strip()
@@ -104,12 +140,7 @@ class Application:
                 )
         if len({rate.region_code for rate in rates}) != len(rates):
             raise ValueError("Duplicate shipping destinations")
-        draft.shipping = rates
-        if not draft.title:
-            draft.title = " ".join(filter(None, [draft.make, draft.model, draft.variant]))
-        if not draft.description:
-            draft.description = self.factual_copy(draft)
-        return self.save(draft, revision)
+        return rates
 
     @staticmethod
     def own_pricing(draft: Draft, fields: dict) -> None:

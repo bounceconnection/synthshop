@@ -5,6 +5,7 @@ import io
 import json
 import re
 from copy import deepcopy
+from html.parser import HTMLParser
 from unittest.mock import patch
 
 import httpx
@@ -195,6 +196,64 @@ def post(client, csrf, draft, action, **fields):
 
 def token(response):
     return re.search(r'name="token" value="([^"]+)"', response.text).group(1)
+
+
+class RenderedForm(HTMLParser):
+    """Successful controls of one rendered form, collected as a browser submits them."""
+
+    def __init__(self, form: str):
+        super().__init__()
+        self.form, self.inside, self.disabled = form, False, False
+        self.values, self.textarea, self.select = {}, None, None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        name = attrs.get("name")
+        if tag == "form":
+            self.inside = self.form in (attrs.get("id"), attrs.get("action"))
+        elif not self.inside or self.disabled:
+            return
+        elif tag == "fieldset":
+            self.disabled = "disabled" in attrs
+        elif tag == "input" and name:
+            checkbox = attrs.get("type") == "checkbox"
+            if not checkbox or "checked" in attrs:
+                self.values[name] = attrs.get("value", "on" if checkbox else "")
+        elif tag == "textarea":
+            self.textarea = name
+            self.values[name] = ""
+        elif tag == "select":
+            self.select = name
+        elif tag == "option" and self.select and "selected" in attrs:
+            self.values[self.select] = attrs["value"]
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self.inside = False
+        elif tag == "fieldset":
+            self.disabled = False
+        elif tag == "textarea":
+            self.textarea = None
+        elif tag == "select":
+            self.select = None
+
+    def handle_data(self, data):
+        if self.inside and self.textarea:
+            self.values[self.textarea] += data
+
+
+def rendered_form(page: str, form: str) -> dict:
+    """Controls the browser would submit from the form with this id or action."""
+    parser = RenderedForm(form)
+    parser.feed(page)
+    return parser.values
+
+
+def offers_and_canada(application, draft):
+    """Owner choices a browser must carry through review instead of silently dropping."""
+    draft.offers_enabled = True
+    draft.shipping.append(ShippingRate(region_code="CA", amount="50.00"))
+    return application.store.save(draft, draft.revision)
 
 
 def test_prepare_stops_unpublished_and_tokens_cannot_cross_purposes(
@@ -548,7 +607,7 @@ def test_reference_drift_is_explained_before_intent_and_never_unverifies_publica
     final = publisher.processed_review(draft.id, draft.revision)
     category = provider.reference_data["categories"][0]
     category["listable"] = False
-    with pytest.raises(ValueError, match="Select an allowed Reverb condition and category"):
+    with pytest.raises(ValueError, match="Select an allowed Reverb category"):
         publisher.publish(draft.id, draft.revision, final["token"])
     saved = application.store.attempt(draft.id)
     assert saved.state == "remote" and "Select an allowed Reverb" in saved.error
@@ -583,7 +642,7 @@ def test_reference_drift_still_allows_read_only_sku_discovery(publication, appli
         prepare(publisher, draft)
     category = provider.reference_data["categories"][0]
     category["listable"] = False
-    with pytest.raises(ValueError, match="Select an allowed Reverb condition and category"):
+    with pytest.raises(ValueError, match="Select an allowed Reverb category"):
         publisher.reconcile(draft.id, draft.revision)
     discovered = application.store.attempt(draft.id)
     assert discovered.state == "remote" and discovered.remote_id == "42"
@@ -705,15 +764,23 @@ def test_browser_serves_manifest_bytes_only_with_session_and_membership(
 
 def test_browser_two_unchecked_grants_and_status_is_read_only(publication, application, draft):
     _publisher, provider = publication
+    draft = offers_and_canada(application, draft)
     client, csrf = browser(application)
-    review = post(client, csrf, draft, "review")
+    fields = rendered_form(client.get(f"/drafts/{draft.id}").text, "draft-fields")
+    review = client.post(f"/drafts/{draft.id}/review", data=fields, headers={"Origin": LOCAL})
     assert review.status_code == 200 and provider.creates == 0
+    draft = application.store.load(draft.id)
     assert post(client, csrf, draft, "prepare", token=token(review)).status_code == 400
     processed = post(
         client, csrf, draft, "prepare", token=token(review), approval="prepare-unpublished"
     )
     assert processed.status_code == 200
     assert provider.creates == 1 and provider.updates == 0
+    assert provider.remote["offers_enabled"] is True
+    assert provider.remote["shipping"]["rates"] == [
+        {"region_code": "US_CON", "rate": {"amount": "0.00", "currency": "USD"}},
+        {"region_code": "CA", "rate": {"amount": "50.00", "currency": "USD"}},
+    ]
     assert post(client, csrf, draft, "publish", token=token(processed)).status_code == 400
     assert (
         post(
