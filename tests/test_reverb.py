@@ -548,7 +548,7 @@ def test_reference_drift_is_explained_before_intent_and_never_unverifies_publica
     final = publisher.processed_review(draft.id, draft.revision)
     category = provider.reference_data["categories"][0]
     category["listable"] = False
-    with pytest.raises(ValueError, match="Select an allowed Reverb condition and category"):
+    with pytest.raises(ValueError, match="Select an allowed Reverb category"):
         publisher.publish(draft.id, draft.revision, final["token"])
     saved = application.store.attempt(draft.id)
     assert saved.state == "remote" and "Select an allowed Reverb" in saved.error
@@ -583,7 +583,7 @@ def test_reference_drift_still_allows_read_only_sku_discovery(publication, appli
         prepare(publisher, draft)
     category = provider.reference_data["categories"][0]
     category["listable"] = False
-    with pytest.raises(ValueError, match="Select an allowed Reverb condition and category"):
+    with pytest.raises(ValueError, match="Select an allowed Reverb category"):
         publisher.reconcile(draft.id, draft.revision)
     discovered = application.store.attempt(draft.id)
     assert discovered.state == "remote" and discovered.remote_id == "42"
@@ -708,6 +708,7 @@ def test_browser_two_unchecked_grants_and_status_is_read_only(publication, appli
     client, csrf = browser(application)
     review = post(client, csrf, draft, "review")
     assert review.status_code == 200 and provider.creates == 0
+    draft = application.store.load(draft.id)
     assert post(client, csrf, draft, "prepare", token=token(review)).status_code == 400
     processed = post(
         client, csrf, draft, "prepare", token=token(review), approval="prepare-unpublished"

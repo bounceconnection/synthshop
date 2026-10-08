@@ -21,6 +21,7 @@ from synthshop.core.models import (
     now,
 )
 from synthshop.core.product_store import DraftConflictError
+from synthshop.core.validation import DraftFieldErrors, FIELD_LABELS
 from synthshop.integrations.reverb import NOT_CREATED, ReverbAPIError, ReverbClient
 from synthshop.integrations.staging import PhotoStaging
 
@@ -39,7 +40,8 @@ FAILURES = (
 
 def with_reason(outcome: str, exc: Exception) -> str:
     """Append only this application's own sanitized refusal text, never library/provider bodies."""
-    detail = str(exc) if type(exc) in (ValueError, ReverbAPIError, DraftConflictError) else ""
+    own = (ValueError, ReverbAPIError, DraftConflictError, DraftFieldErrors)
+    detail = str(exc) if type(exc) in own else ""
     return f"{outcome} {detail}".strip()
 
 
@@ -65,8 +67,34 @@ class Publisher:
     def __init__(self, application: Application):
         self.app = application
 
+    @staticmethod
+    def field_errors(draft: Draft, references: dict) -> dict[str, str]:
+        """Authoritative editable requirements, shared by review and publication."""
+        errors = {}
+        for name in ("make", "model", "title", "description", "price_reason"):
+            if not getattr(draft, name).strip():
+                errors[name] = f"Enter {FIELD_LABELS[name].lower()} before review."
+        if not any(row["display_name"] == draft.condition for row in references["conditions"]):
+            errors["condition"] = "Select an allowed Reverb condition."
+        if not any(
+            row["uuid"] == draft.category_id and row.get("listable", True)
+            for row in references["categories"]
+        ):
+            errors["category_id"] = "Select an allowed Reverb category."
+        if draft.price is None or draft.price <= 0:
+            errors["price"] = "Enter a positive owner-reviewed USD asking price."
+        regions = {row["code"] for row in references["regions"]}
+        if any(rate.region_code not in regions for rate in draft.shipping):
+            errors["international_rates"] = (
+                "Unknown shipping destination; use a Reverb region code."
+            )
+        return errors
+
     def payload(self, draft: Draft, references: dict) -> dict:
         """Resolve identifiers and explicit rates before the preparation review screen."""
+        errors = self.field_errors(draft, references)
+        if errors:
+            raise DraftFieldErrors(errors, references)
         condition = next(
             (row for row in references["conditions"] if row["display_name"] == draft.condition),
             None,
@@ -79,8 +107,6 @@ class Publisher:
             ),
             None,
         )
-        if not condition or not category:
-            raise ValueError("Select an allowed Reverb condition and category from reference data.")
         regions = {row["code"]: row["name"] for row in references["regions"]}
         if regions.get("US_CON") != "Continental U.S.":
             raise ValueError("Reverb continental-US region could not be confirmed.")
@@ -90,13 +116,6 @@ class Publisher:
             or draft.shipping[0].amount
         ):
             raise ValueError("Explicit free continental-US shipping is required.")
-        if any(rate.region_code not in regions for rate in draft.shipping):
-            raise ValueError("Unknown shipping destination; select a Reverb region code.")
-        for name in ("make", "model", "title", "description", "condition", "price_reason"):
-            if not getattr(draft, name).strip():
-                raise ValueError(f"Complete {name.replace('_', ' ')} before final approval.")
-        if draft.price is None or draft.price <= 0:
-            raise ValueError("Enter a positive owner-reviewed USD asking price.")
         if draft.legacy_remote_id or draft.legacy_status not in (None, "draft"):
             raise ValueError(
                 "Imported linked/non-draft product cannot become a fresh create. "
@@ -167,7 +186,7 @@ class Publisher:
         ):
             raise ValueError("Production target must be bounceconnection (1333667).")
 
-    def review(self, draft_id: str, revision: int) -> dict:
+    def review(self, draft_id: str, revision: int, fields: dict | None = None) -> dict:
         """Read-only preparation review; this challenge cannot authorize a publish PUT."""
         self.app.store.attempt(draft_id)  # Release only an unsent reservation under its lock.
         with self.app.store.publish_lock():
@@ -176,11 +195,19 @@ class Publisher:
                 raise DraftConflictError(
                     "Attempt exists. Inspect processed photos or check status."
                 )
+            errors = {}
+            if fields is not None:
+                draft, errors = self.app.prepare_edit(draft, fields)
             settings = self.app.settings
             with ReverbClient(settings, authenticated=bool(settings.reverb_api_token)) as client:
                 references = client.references()
+                errors = {**self.field_errors(draft, references), **errors}
+                if errors:
+                    raise DraftFieldErrors(errors, references)
                 payload = self.payload(draft, references)
                 shop = client.verify_shop() if settings.reverb_api_token else None
+            if fields is not None:
+                draft = self.app.save(draft, revision)
             token = secrets.token_urlsafe(32)
             self.app.store.review(
                 draft,

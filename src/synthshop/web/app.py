@@ -17,6 +17,7 @@ from synthshop.core.photos import MAX_BYTES
 from synthshop.core.pricing import recommendation
 from synthshop.core.product_store import DraftConflictError
 from synthshop.core.publishing import Publisher
+from synthshop.core.validation import DraftFieldErrors, FIELD_LABELS
 from synthshop.integrations.reverb import ReverbClient
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -147,8 +148,45 @@ def snapshot_entry(attempt: Attempt | None, snapshot_id: str, blob_id: str) -> R
     return entry
 
 
+def draft_editor(request: Request, draft, *, fields=None, errors=None, references=None):
+    """Keep rejected owner input separate from the unchanged saved revision."""
+    service = request.app.state.service
+    values = draft.model_dump()
+    values["price"] = str(draft.price) if draft.price is not None else ""
+    values["international_rates"] = "".join(
+        f"{rate.region_code}={rate.amount}\n"
+        for rate in draft.shipping if rate.region_code != "US_CON"
+    )
+    if fields is not None:
+        values.update({name: str(fields[name]) for name in FIELD_LABELS if name in fields})
+        values["offers_enabled"] = fields.get("offers_enabled") in (True, "on", "true")
+    ordered_errors = {
+        name: errors[name] for name in FIELD_LABELS if errors and name in errors
+    }
+    response = render(
+        request, "draft.html", draft=draft, values=values, errors=ordered_errors,
+        labels=FIELD_LABELS, first_error=next(iter(ordered_errors), None),
+        pricing=recommendation(draft), attempt=service.store.attempt(draft.id),
+        references=references,
+    )
+    response.status_code = 400 if errors else 200
+    return response
+
+
 async def action_error(request: Request, exc: Exception):
     """Keep provider bodies, file paths and validation input out of rendered errors."""
+    if isinstance(exc, DraftFieldErrors) and request.path_params.get("action") in (
+        "save", "review"
+    ):
+        form = await request.form()
+        draft = request.app.state.service.store.load(request.path_params["draft_id"])
+        if draft.revision != int(str(form["revision"])):
+            return await action_error(
+                request, DraftConflictError("This tab is stale. Reload the current revision.")
+            )
+        return draft_editor(
+            request, draft, fields=form, errors=exc.errors, references=exc.references
+        )
     if isinstance(exc, PermissionError):
         status, message = 403, "Session/CSRF check failed. Reload the local page."
     elif isinstance(exc, KeyError):
@@ -235,15 +273,7 @@ def create_app(settings: Settings | None = None, *, port: int = 8765) -> FastAPI
 
     @app.get("/drafts/{draft_id}", response_class=HTMLResponse)
     def editor(request: Request, draft_id: str):
-        draft = service.store.load(draft_id)
-        return render(
-            request,
-            "draft.html",
-            draft=draft,
-            pricing=recommendation(draft),
-            attempt=service.store.attempt(draft_id),
-            references=None,
-        )
+        return draft_editor(request, service.store.load(draft_id))
 
     @app.post("/drafts/{draft_id}/{action}")
     async def mutate(request: Request, draft_id: str, action: str):
@@ -282,16 +312,9 @@ def create_app(settings: Settings | None = None, *, port: int = 8765) -> FastAPI
         elif action == "references":
             draft = service.current(draft_id, revision)
             references = await run_in_threadpool(load_references, service.settings)
-            return render(
-                request,
-                "draft.html",
-                draft=draft,
-                pricing=recommendation(draft),
-                attempt=service.store.attempt(draft_id),
-                references=references,
-            )
+            return draft_editor(request, draft, references=references)
         elif action == "review":
-            context = await run_in_threadpool(publisher.review, draft_id, revision)
+            context = await run_in_threadpool(publisher.review, draft_id, revision, dict(form))
             return render(request, "review.html", **context)
         elif action == "prepare":
             token = approved_token(
