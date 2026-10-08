@@ -148,8 +148,11 @@ def snapshot_entry(attempt: Attempt | None, snapshot_id: str, blob_id: str) -> R
     return entry
 
 
-def draft_editor(request: Request, draft, *, fields=None, errors=None, references=None):
-    """Keep rejected owner input separate from the unchanged saved revision."""
+def draft_editor(request: Request, draft, *, fields=None, errors=None, **context):
+    """Keep rejected owner input separate from the unchanged saved revision.
+
+    Extra context: authoritative ``references`` and a form-level, non-field review ``blocker``.
+    """
     service = request.app.state.service
     values = draft.model_dump()
     values["price"] = str(draft.price) if draft.price is not None else ""
@@ -167,9 +170,9 @@ def draft_editor(request: Request, draft, *, fields=None, errors=None, reference
         request, "draft.html", draft=draft, values=values, errors=ordered_errors,
         labels=FIELD_LABELS, first_error=next(iter(ordered_errors), None),
         pricing=recommendation(draft), attempt=service.store.attempt(draft.id),
-        references=references,
+        **{"references": None, "blocker": None, **context},
     )
-    response.status_code = 400 if errors else 200
+    response.status_code = 400 if errors or context.get("blocker") else 200
     return response
 
 
@@ -187,6 +190,11 @@ async def action_error(request: Request, exc: Exception):
         return draft_editor(
             request, draft, fields=form, errors=exc.errors, references=exc.references
         )
+    if type(exc) in (ValueError,) and request.path_params.get("action") == "review":
+        form = await request.form()
+        draft = request.app.state.service.store.load(request.path_params["draft_id"])
+        if str(draft.revision) == form.get("revision"):
+            return draft_editor(request, draft, fields=form, blocker=str(exc))
     if isinstance(exc, PermissionError):
         status, message = 403, "Session/CSRF check failed. Reload the local page."
     elif isinstance(exc, KeyError):
@@ -197,7 +205,8 @@ async def action_error(request: Request, exc: Exception):
         status = 409 if isinstance(exc, DraftConflictError) else 400
         message = (
             str(exc)
-            if type(exc) in (ValueError, DraftConflictError, MissingOpenAIKeyError)
+            if type(exc)
+            in (ValueError, DraftConflictError, MissingOpenAIKeyError, DraftFieldErrors)
             else "Invalid input; check fields."
         )
     response = render(

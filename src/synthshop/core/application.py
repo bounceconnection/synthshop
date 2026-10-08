@@ -70,13 +70,18 @@ class Application:
         return self.save(draft, revision)
 
     def save(self, draft: Draft, revision: int | None) -> Draft:
+        """Persist through the revision check after pricing follows the recommendation."""
+        return self.store.save(self.follow_recommendation(draft), revision)
+
+    @staticmethod
+    def follow_recommendation(draft: Draft) -> Draft:
         """Price and reasoning the owner has not changed follow the current recommendation."""
         pricing = recommendation(draft)
         if "price" not in draft.owner_fields:
             draft.price = pricing["ask"]
         if "price_reason" not in draft.owner_fields:
             draft.price_reason = pricing["rationale"] if pricing["ask"] else ""
-        return self.store.save(draft, revision)
+        return draft
 
     def edit(self, draft_id: str, revision: int, fields: dict) -> Draft:
         """Owner corrections win, including explicit nonfunctioning/poor condition."""
@@ -105,10 +110,7 @@ class Application:
                     self.own_pricing(draft, {name: fields[name]})
                 except ValueError as exc:
                     errors[name] = str(exc)
-        offers = fields.get("offers_enabled")
-        if offers not in (None, False, True, "on", "true"):
-            errors["offers_enabled"] = "Use the Accept offers checkbox."
-        draft.offers_enabled = offers in (True, "on", "true")
+        draft.offers_enabled = fields.get("offers_enabled") in (True, "on", "true")
         try:
             draft.shipping = self.shipping_rates(str(fields.get("international_rates", "")))
         except ValueError as exc:
@@ -119,12 +121,7 @@ class Application:
         if len(draft.title) > 255:
             errors["title"] = "Title must be at most 255 characters."
         draft.description = draft.description or self.factual_copy(draft)
-        pricing = recommendation(draft)
-        if "price" not in draft.owner_fields:
-            draft.price = pricing["ask"]
-        if "price_reason" not in draft.owner_fields:
-            draft.price_reason = pricing["rationale"] if pricing["ask"] else ""
-        return draft, errors
+        return self.follow_recommendation(draft), errors
 
     @staticmethod
     def shipping_rates(text: str) -> list[ShippingRate]:

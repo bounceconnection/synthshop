@@ -37,6 +37,14 @@ FAILURES = (
     ClientError,
 )
 
+STALE_RECOMMENDATION = {
+    "price": "Kept as entered, but this was the recommendation for the previous maker, model, "
+    "variant or condition and no longer applies. Choose Save owner corrections & copy first, "
+    "then enter your own price (the same amount is fine) or research again.",
+    "price_reason": "Kept as entered, but this reasoning belonged to that recommendation. "
+    "After saving, enter your own reasoning.",
+}
+
 
 def with_reason(outcome: str, exc: Exception) -> str:
     """Append only this application's own sanitized refusal text, never library/provider bodies."""
@@ -89,6 +97,17 @@ class Publisher:
                 "Unknown shipping destination; use a Reverb region code."
             )
         return errors
+
+    @staticmethod
+    def stale_recommendation(saved: Draft, draft: Draft, fields: dict) -> dict[str, str]:
+        """Submitted unchanged recommended pricing that the candidate's edits invalidated."""
+        return {
+            name: message
+            for name, message in STALE_RECOMMENDATION.items()
+            if name not in draft.owner_fields
+            and str(fields.get(name, "")).strip()
+            and getattr(draft, name) != getattr(saved, name)
+        }
 
     def payload(self, draft: Draft, references: dict) -> dict:
         """Resolve identifiers and explicit rates before the preparation review screen."""
@@ -197,7 +216,9 @@ class Publisher:
                 )
             errors = {}
             if fields is not None:
-                draft, errors = self.app.prepare_edit(draft, fields)
+                saved = draft
+                draft, errors = self.app.prepare_edit(saved.model_copy(deep=True), fields)
+                errors = {**self.stale_recommendation(saved, draft, fields), **errors}
             settings = self.app.settings
             with ReverbClient(settings, authenticated=bool(settings.reverb_api_token)) as client:
                 references = client.references()

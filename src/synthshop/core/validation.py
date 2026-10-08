@@ -7,7 +7,7 @@ FIELD_LABELS = {
     "condition": "Owner condition", "category_id": "Reverb category",
     "category_name": "Category name", "title": "Title", "description": "Description",
     "price": "Owner asking price", "price_reason": "Private price reasoning / owner override",
-    "offers_enabled": "Accept offers", "international_rates": "Additional region rates",
+    "international_rates": "Additional region rates",
 }
 
 

@@ -1,5 +1,7 @@
 """Draft HTTP submissions retain edits and cannot bypass review/revision safety."""
 
+import json
+from decimal import Decimal
 from unittest.mock import Mock
 
 import httpx
@@ -8,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from synthshop.web.app import create_app
+from tests.test_reverb import rendered_form
 
 LOCAL = "http://127.0.0.1:8765"
 
@@ -116,12 +119,11 @@ def test_correcting_invalid_review_saves_visible_maker_before_review(
 @pytest.mark.parametrize("price", ["NaN", "Infinity", "-1", "1.001", "1000000000000"])
 def test_tampered_money_retained_without_saving(application, draft, editor, action, price):
     response = submit(editor, draft, {
-        "make": "Unsaved correction", "price": price,
-        "international_rates": "CA=not-money", "offers_enabled": "forged",
+        "make": "Unsaved correction", "price": price, "international_rates": "CA=not-money",
     }, action)
     assert response.status_code == 400
     assert response.template.name == "draft.html"
-    assert set(response.context["errors"]) == {"price", "international_rates", "offers_enabled"}
+    assert set(response.context["errors"]) == {"price", "international_rates"}
     assert response.context["values"]["price"] == price
     assert response.context["values"]["make"] == "Unsaved correction"
     assert application.store.load(draft.id) == draft
@@ -191,3 +193,89 @@ def test_unknown_destination_is_field_error(application, draft, editor):
     assert set(response.context["errors"]) == {"international_rates"}
     assert response.context["values"]["international_rates"] == "MARS=20.00"
     assert application.store.load(draft.id) == draft
+
+
+def recommended(application, draft):
+    """Two reviewed sold observations; price and reasoning follow their recommendation."""
+    rows = [
+        {
+            "provider": "eBay", "url": f"https://www.ebay.com/itm/{number}",
+            "source_id": str(number), "source_class": "sold_display",
+            "provenance": "Owner observed sold page", "title": "Example Instruments Meter Stereo",
+            "amount": amount, "shipping": "0", "shipping_region": "US_CON",
+        }
+        for number, amount in ((1, "200.00"), (2, "220.00"))
+    ]
+    item = application.import_evidence(draft.id, draft.revision, json.dumps(rows))
+    for comp_id in [comp.id for comp in item.evidence]:
+        item = application.review_evidence(item.id, item.revision, comp_id, True, "Exact")
+    return application.edit(item.id, item.revision, {"price": "", "price_reason": ""})
+
+
+def test_identity_change_explains_stale_recommendation_then_save_permits_same_amount(
+    application, draft, editor
+):
+    client = editor[0]
+    item = recommended(application, draft)
+    assert item.price == Decimal("210.00")
+    assert "price" not in item.owner_fields
+    form = rendered_form(client.get(f"/drafts/{item.id}").text, "draft-fields")
+    assert form["price"] == "210.00"
+    form["make"] = "Corrected Instruments"
+    for _resubmission in range(2):
+        stale = client.post(f"/drafts/{item.id}/review", data=form, headers={"Origin": LOCAL})
+        assert stale.status_code == 400
+        assert stale.template.name == "draft.html"
+        assert set(stale.context["errors"]) == {"price", "price_reason"}
+        assert "Save owner corrections & copy first" in stale.context["errors"]["price"]
+        assert "follow the supported recommendation" not in stale.text
+        form = rendered_form(stale.text, "draft-fields")
+        assert form["price"] == "210.00"
+        assert form["make"] == "Corrected Instruments"
+    assert application.store.load(item.id) == item
+    saved = client.post(f"/drafts/{item.id}/save", data=form, headers={"Origin": LOCAL})
+    assert saved.status_code == 200
+    form = rendered_form(saved.text, "draft-fields")
+    assert form["make"] == "Corrected Instruments"
+    assert form["price"] == form["price_reason"] == ""
+    form.update(price="210.00", price_reason="Owner reviewed after identity correction")
+    reviewed = client.post(f"/drafts/{item.id}/review", data=form, headers={"Origin": LOCAL})
+    assert reviewed.status_code == 200
+    assert reviewed.template.name == "review.html"
+    assert reviewed.context["payload"]["make"] == "Corrected Instruments"
+    assert reviewed.context["payload"]["price"]["amount"] == "210.00"
+    assert {"price", "price_reason"} <= set(application.store.load(item.id).owner_fields)
+    assert application.store.attempt(item.id) is None
+
+
+def test_local_review_blocker_keeps_entries_as_form_error(application, draft, editor):
+    draft.legacy_remote_id = "existing-123"
+    draft = application.store.save(draft, draft.revision)
+    response = submit(editor, draft, {"make": "Unsaved maker", "price": "200.00"})
+    assert response.status_code == 400
+    assert response.template.name == "draft.html"
+    assert not response.context["errors"]
+    assert "cannot become a fresh create" in response.context["blocker"]
+    assert response.context["values"]["make"] == "Unsaved maker"
+    assert response.context["values"]["price"] == "200.00"
+    assert application.store.load(draft.id) == draft
+    assert application.store.attempt(draft.id) is None
+    editor[2].verify_shop.assert_not_called()
+
+
+def test_prepare_reports_specific_field_errors(application, draft, editor, references):
+    for name, value in {
+        "reverb_api_token": "test-only", "r2_account_id": "example",
+        "r2_access_key_id": "test-only", "r2_secret_access_key": "test-only",
+        "reverb_processed_photo_review_confirmed": True,
+    }.items():
+        setattr(application.settings, name, value)
+    editor[2].references.return_value = {**references, "conditions": []}
+    response = submit(
+        editor, draft, {"token": "unused", "approval": "prepare-unpublished"}, "prepare"
+    )
+    assert response.status_code == 400
+    assert response.template.name == "error.html"
+    assert response.context["message"] == "Select an allowed Reverb condition."
+    assert application.store.load(draft.id) == draft
+    assert application.store.attempt(draft.id) is None
