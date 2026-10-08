@@ -12,6 +12,7 @@ from starlette.datastructures import UploadFile
 
 from synthshop.core.application import Application
 from synthshop.core.config import MissingOpenAIKeyError, Settings
+from synthshop.core.models import Attempt, Representation
 from synthshop.core.photos import MAX_BYTES
 from synthshop.core.pricing import recommendation
 from synthshop.core.product_store import DraftConflictError
@@ -112,6 +113,40 @@ async def form_data(request: Request):
     return form
 
 
+async def uploaded_photos(form) -> list[bytes]:
+    """Read each photo upload one byte past the per-image limit, so intake can refuse it."""
+    uploads = [item for item in form.getlist("photos") if isinstance(item, UploadFile)]
+    return [await item.read(MAX_BYTES + 1) for item in uploads]
+
+
+def load_references(settings: Settings) -> dict:
+    """Read-only reference lookup; anonymous unless a Reverb token is configured."""
+    with ReverbClient(settings, authenticated=bool(settings.reverb_api_token)) as client:
+        return client.references()
+
+
+def approved_token(form, approval: str, refusal: str) -> str:
+    """A stage token counts only alongside that stage's own explicit authorization box."""
+    if form.get("approval") != approval:
+        raise ValueError(refusal)
+    return str(form.get("token", ""))
+
+
+def snapshot_entry(attempt: Attempt | None, snapshot_id: str, blob_id: str) -> Representation:
+    """Serve only a verified member of the attempt's current snapshot, never a caller path."""
+    if not attempt or not attempt.snapshot or attempt.snapshot.id != snapshot_id:
+        raise KeyError("Snapshot not found")
+    snapshot = attempt.snapshot
+    snapshot.verify()
+    entry = next(
+        (entry for entry in [*snapshot.gallery, snapshot.cover] if entry.blob_id == blob_id),
+        None,
+    )
+    if entry is None:
+        raise KeyError("Snapshot blob not found")
+    return entry
+
+
 async def action_error(request: Request, exc: Exception):
     """Keep provider bodies, file paths and validation input out of rendered errors."""
     if isinstance(exc, PermissionError):
@@ -188,24 +223,13 @@ def create_app(settings: Settings | None = None, *, port: int = 8765) -> FastAPI
 
     @app.get("/snapshots/{draft_id}/{snapshot_id}/{blob_id}")
     def snapshot_image(draft_id: str, snapshot_id: str, blob_id: str):
-        attempt = service.store.attempt(draft_id)
-        if not attempt or not attempt.snapshot or attempt.snapshot.id != snapshot_id:
-            raise KeyError("Snapshot not found")
-        snapshot = attempt.snapshot
-        snapshot.verify()
-        entry = next(
-            (entry for entry in [*snapshot.gallery, snapshot.cover] if entry.blob_id == blob_id),
-            None,
-        )
-        if entry is None:
-            raise KeyError("Snapshot blob not found")
+        entry = snapshot_entry(service.store.attempt(draft_id), snapshot_id, blob_id)
         return Response(service.snapshots.read(entry), media_type=entry.media_type)
 
     @app.post("/drafts")
     async def intake(request: Request):
         form = await form_data(request)
-        uploads = [item for item in form.getlist("photos") if isinstance(item, UploadFile)]
-        content = [await item.read(MAX_BYTES + 1) for item in uploads]
+        content = await uploaded_photos(form)
         draft = await run_in_threadpool(service.upload, content)
         return RedirectResponse(f"/drafts/{draft.id}", status_code=303)
 
@@ -225,7 +249,12 @@ def create_app(settings: Settings | None = None, *, port: int = 8765) -> FastAPI
     async def mutate(request: Request, draft_id: str, action: str):
         form = await form_data(request)
         revision = int(str(form.get("revision", "0")))
-        simple_actions = {"analyze": service.analyze, "research": service.research}
+        simple_actions = {
+            "analyze": service.analyze,
+            "research": service.research,
+            "status": publisher.reconcile,
+            "decline": publisher.decline,
+        }
         if action in simple_actions:
             await run_in_threadpool(simple_actions[action], draft_id, revision)
         elif action == "save":
@@ -248,19 +277,11 @@ def create_app(settings: Settings | None = None, *, port: int = 8765) -> FastAPI
                 service.reorder, draft_id, revision, str(form["order"]).split(",")
             )
         elif action == "photos":
-            uploads = [item for item in form.getlist("photos") if isinstance(item, UploadFile)]
-            content = [await item.read(MAX_BYTES + 1) for item in uploads]
+            content = await uploaded_photos(form)
             await run_in_threadpool(service.upload, content, draft_id, revision)
         elif action == "references":
             draft = service.current(draft_id, revision)
-
-            def load_references():
-                with ReverbClient(
-                    service.settings, authenticated=bool(service.settings.reverb_api_token)
-                ) as client:
-                    return client.references()
-
-            references = await run_in_threadpool(load_references)
+            references = await run_in_threadpool(load_references, service.settings)
             return render(
                 request,
                 "draft.html",
@@ -273,29 +294,20 @@ def create_app(settings: Settings | None = None, *, port: int = 8765) -> FastAPI
             context = await run_in_threadpool(publisher.review, draft_id, revision)
             return render(request, "review.html", **context)
         elif action == "prepare":
-            if form.get("approval") != "prepare-unpublished":
-                raise ValueError(
-                    "Explicit authorization to prepare an unpublished draft is required."
-                )
-            await run_in_threadpool(
-                publisher.prepare,
-                draft_id,
-                revision,
-                str(form.get("token", "")),
+            token = approved_token(
+                form,
+                "prepare-unpublished",
+                "Explicit authorization to prepare an unpublished draft is required.",
             )
+            await run_in_threadpool(publisher.prepare, draft_id, revision, token)
             return RedirectResponse(f"/drafts/{draft_id}/processed", status_code=303)
         elif action == "publish":
-            if form.get("approval") != "publish-reviewed-processed":
-                raise ValueError(
-                    "Explicit approval of this processed gallery and cover is required."
-                )
-            await run_in_threadpool(
-                publisher.publish, draft_id, revision, str(form.get("token", ""))
+            token = approved_token(
+                form,
+                "publish-reviewed-processed",
+                "Explicit approval of this processed gallery and cover is required.",
             )
-        elif action == "status":
-            await run_in_threadpool(publisher.reconcile, draft_id, revision)
-        elif action == "decline":
-            await run_in_threadpool(publisher.decline, draft_id, revision)
+            await run_in_threadpool(publisher.publish, draft_id, revision, token)
         else:
             raise KeyError("Unknown action")
         return RedirectResponse(f"/drafts/{draft_id}", status_code=303)

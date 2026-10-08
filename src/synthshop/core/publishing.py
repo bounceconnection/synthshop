@@ -187,7 +187,6 @@ class Publisher:
                 token,
                 self.fingerprint(draft, payload),
                 payload,
-                purpose="prepare",
             )
             return {
                 "draft": draft,
@@ -407,7 +406,6 @@ class Publisher:
                         token,
                         attempt.fingerprint,
                         attempt.approved_payload,
-                        purpose="publish",
                         snapshot=attempt.snapshot,
                     )
             return {

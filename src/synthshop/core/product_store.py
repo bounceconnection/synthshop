@@ -22,6 +22,44 @@ class DraftConflictError(ValueError):
     """A stale tab or active remote attempt must not overwrite reviewed state."""
 
 
+def _binds(review: sqlite3.Row, token: str, fingerprint: str, purpose: str) -> bool:
+    """The stored challenge carries this token, binding and purpose under this contract."""
+    return (
+        review["token"] == token
+        and review["fingerprint"] == fingerprint
+        and review["purpose"] == purpose
+        and review["contract"] == CONTRACT
+    )
+
+
+def _current(review: sqlite3.Row, current: sqlite3.Row | None, draft: Draft) -> bool:
+    """Both the challenge and the stored draft remain at the submitted revision."""
+    return (
+        review["revision"] == draft.revision
+        and current is not None
+        and current[0] == draft.revision
+    )
+
+
+def _awaits_final_approval(attempt: Attempt) -> bool:
+    """Captured for review, under this contract, with no intent or live observation yet."""
+    return (
+        attempt.state == "review_ready"
+        and not attempt.publish_intent_at
+        and not attempt.live_observed
+        and attempt.contract == CONTRACT
+    )
+
+
+def _binds_snapshot(review: sqlite3.Row, snapshot: ProcessedSnapshot | None) -> bool:
+    """The final challenge names the attempt's current snapshot and manifest."""
+    return (
+        snapshot is not None
+        and review["snapshot_id"] == snapshot.id
+        and review["manifest_digest"] == snapshot.digest
+    )
+
+
 class DraftStore:
     """All mutations are atomic. Original JSON remains untouched on migration."""
 
@@ -207,10 +245,13 @@ class DraftStore:
         fingerprint: str,
         payload: dict,
         *,
-        purpose: str,
         snapshot: ProcessedSnapshot | None = None,
     ) -> None:
-        """Persist a purpose-bound challenge, never remote-write permission."""
+        """Persist a purpose-bound challenge, never remote-write permission.
+
+        Only a final challenge binds a processed snapshot, so its presence sets the purpose.
+        """
+        purpose = "publish" if snapshot is not None else "prepare"
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             current = db.execute("SELECT revision FROM drafts WHERE id=?", (draft.id,)).fetchone()
@@ -243,13 +284,8 @@ class DraftStore:
         if (
             not review
             or not token
-            or review["token"] != token
-            or review["fingerprint"] != fingerprint
-            or review["purpose"] != purpose
-            or review["revision"] != draft.revision
-            or not current
-            or review["contract"] != CONTRACT
-            or current[0] != draft.revision
+            or not _binds(review, token, fingerprint, purpose)
+            or not _current(review, current, draft)
         ):
             raise DraftConflictError("Approval is missing, stale or for a different purpose.")
         return review
@@ -284,13 +320,8 @@ class DraftStore:
             attempt = Attempt.model_validate_json(row[0]) if row else None
             if (
                 attempt != expected
-                or attempt.state != "review_ready"
-                or attempt.publish_intent_at
-                or attempt.live_observed
-                or attempt.contract != CONTRACT
-                or not attempt.snapshot
-                or review["snapshot_id"] != attempt.snapshot.id
-                or review["manifest_digest"] != attempt.snapshot.digest
+                or not _awaits_final_approval(attempt)
+                or not _binds_snapshot(review, attempt.snapshot)
             ):
                 raise DraftConflictError("Processed approval changed or was already consumed.")
             attempt.snapshot.verify()
