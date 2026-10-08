@@ -22,8 +22,7 @@ APPLE_GAIN_MAP = XMP.format(
     'HDRGainMap:HDRGainMapVersion="65536"'
 ).encode()
 ADOBE_GAIN_MAP = XMP.format(
-    'xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/" '
-    'hdrgm:Version="1.0" hdrgm:GainMapMax="2.0"'
+    'xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/" hdrgm:Version="1.0" hdrgm:GainMapMax="2.0"'
 ).encode()
 UNRELATED = XMP.format(
     'xmlns:dc="http://purl.org/dc/elements/1.1/" dc:format="image/jpeg"'

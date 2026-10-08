@@ -66,7 +66,7 @@ class Publisher:
         self.app = application
 
     def payload(self, draft: Draft, references: dict) -> dict:
-        """Resolve identifiers and explicit rates before the final review screen."""
+        """Resolve identifiers and explicit rates before the preparation review screen."""
         condition = next(
             (row for row in references["conditions"] if row["display_name"] == draft.condition),
             None,

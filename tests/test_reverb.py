@@ -70,7 +70,8 @@ class Provider(ReverbClient):
         if images is None:
             images = [Staging.images[url] for url in payload["photos"]]
         self.image_bytes = {
-            f"https://images.reverb.com/image/upload/photo-{index}.jpg?signature=secret-fixture": content
+            f"https://images.reverb.com/image/upload/photo-{index}.jpg"
+            "?signature=secret-fixture": content
             for index, content in enumerate(images)
         }
         photos = [{"id": 101 + index, "url": url} for index, url in enumerate(self.image_bytes)]
@@ -560,9 +561,7 @@ def test_reference_drift_is_explained_before_intent_and_never_unverifies_publica
     assert provider.updates == 1
 
 
-def test_reference_drift_never_blocks_historical_read_only_status(
-    publication, application, draft
-):
+def test_reference_drift_never_blocks_historical_read_only_status(publication, application, draft):
     publisher, provider = publication
     prepare(publisher, draft)
     seed_old_attempt(application, draft, publisher, "published")
@@ -869,7 +868,8 @@ def seed_old_attempt(application, draft, publisher, state, *, proven=True):
     with application.store.connect() as db:
         db.execute("DROP TABLE reviews")
         db.execute(
-            "CREATE TABLE reviews (id TEXT PRIMARY KEY, token TEXT, revision INTEGER, fingerprint TEXT, payload TEXT)"
+            "CREATE TABLE reviews (id TEXT PRIMARY KEY, token TEXT, revision INTEGER, "
+            "fingerprint TEXT, payload TEXT)"
         )
         db.execute(
             "INSERT INTO reviews VALUES (?, ?, ?, ?, ?)",
@@ -923,9 +923,7 @@ def test_old_state_migration_retains_history_and_never_manufactures_approval(
     assert provider.updates == (1 if state in ("creating", "remote") else 0)
 
 
-def test_decline_cannot_reopen_historical_publish_for_a_second_put(
-    publication, application, draft
-):
+def test_decline_cannot_reopen_historical_publish_for_a_second_put(publication, application, draft):
     publisher, provider = publication
     prepare(publisher, draft)
     seed_old_attempt(application, draft, publisher, "publishing")

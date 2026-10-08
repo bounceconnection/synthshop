@@ -7,10 +7,10 @@ import re
 import warnings
 from pathlib import Path
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 
 from synthshop.core.models import ProcessedSnapshot, Representation
-from synthshop.core.photos import MAX_BYTES, MAX_PIXELS
+from synthshop.core.photos import DECODE_ERRORS, MAX_BYTES, MAX_PIXELS
 
 MEDIA_TYPES = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
 
@@ -29,12 +29,7 @@ def decoded_metadata(content: bytes, media_type: str) -> dict:
                     raise ValueError("Processed photo must be static and at most 40 megapixels.")
                 image.load()
                 return {"format": image.format, "width": image.width, "height": image.height}
-    except (
-        UnidentifiedImageError,
-        OSError,
-        Image.DecompressionBombError,
-        Image.DecompressionBombWarning,
-    ) as exc:
+    except DECODE_ERRORS as exc:
         raise ValueError("Processed photo cannot be decoded safely.") from exc
 
 

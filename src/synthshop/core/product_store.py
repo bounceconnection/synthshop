@@ -218,7 +218,8 @@ class DraftStore:
                 raise DraftConflictError("Draft changed during review. Reload.")
             db.execute(
                 "INSERT OR REPLACE INTO reviews "
-                "(id,token,revision,fingerprint,payload,purpose,snapshot_id,manifest_digest,contract) "
+                "(id,token,revision,fingerprint,payload,"
+                "purpose,snapshot_id,manifest_digest,contract) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     draft.id,

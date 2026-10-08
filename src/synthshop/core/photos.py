@@ -14,6 +14,12 @@ MAX_BYTES = 20 * 1024 * 1024
 MAX_PIXELS = 40_000_000
 MAX_PHOTOS = 25
 FORMATS = {"JPEG", "PNG", "WEBP", "GIF"}
+DECODE_ERRORS = (
+    UnidentifiedImageError,
+    OSError,
+    Image.DecompressionBombError,
+    Image.DecompressionBombWarning,
+)
 XMP_HEADER = b"http://ns.adobe.com/xap/1.0/\x00"
 GAIN_MAP_MARKERS = (
     b"urn:com:apple:photo:2020:aux:hdrgainmap",  # Apple auxiliary image type
@@ -86,12 +92,7 @@ class PhotoLibrary:
                     image.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
                     output = io.BytesIO()
                     image.save(output, "JPEG", quality=90)
-        except (
-            UnidentifiedImageError,
-            OSError,
-            Image.DecompressionBombError,
-            Image.DecompressionBombWarning,
-        ) as exc:
+        except DECODE_ERRORS as exc:
             raise ValueError(
                 "Corrupt, unsupported, or oversized image; upload a valid still photo."
             ) from exc
