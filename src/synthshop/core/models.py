@@ -1,5 +1,7 @@
 """Revisioned local listing and evidence contracts; money never uses binary floats."""
 
+import hashlib
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
@@ -137,6 +139,107 @@ class Draft(Record):
         return {name: getattr(self, name) for name in OWNER_FACT_FIELDS}
 
 
+CONTRACT = "processed-photo-review-1"
+PROFILE = "listing-full-fixed-1"
+
+
+def manifest_digest(value: dict) -> str:
+    """Canonical digest; no timestamps or paths are implicitly discarded."""
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+class LocalPhotoBinding(Record):
+    """Intended correspondence, attested by the seller rather than inferred."""
+
+    id: str
+    digest: str
+    position: int
+
+
+class PreparationGrant(Record):
+    """One authorized create, or a verified historical create binding."""
+
+    contract: str = CONTRACT
+    authorized_at: str | None = None
+    historical: bool = False
+    api_origin: str
+    shop_id: str
+    shop_slug: str
+    backend_binding: str
+    photos: list[LocalPhotoBinding]
+
+
+class Representation(Record):
+    """One exact fetched entity; cover is independent of the gallery."""
+
+    identity_kind: str
+    identity: str
+    relation: str
+    locator_digest: str
+    digest: str
+    byte_count: int
+    media_type: str
+    format: str
+    width: int
+    height: int
+    blob_id: str = Field(default_factory=lambda: uuid4().hex)
+
+    def projection(self) -> dict:
+        """Only the cache identity is incidental to representation equality."""
+        return self.model_dump(exclude={"blob_id"})
+
+
+class ProcessedSnapshot(Record):
+    """Immutable persisted envelope; subsequent observations never rewrite approval."""
+
+    id: str = Field(default_factory=lambda: uuid4().hex)
+    contract: str = CONTRACT
+    profile: str = PROFILE
+    captured_at: str = Field(default_factory=now)
+    draft_id: str
+    revision: int
+    fingerprint: str
+    payload: dict
+    remote_id: str
+    target: PreparationGrant
+    observed_state: str
+    gallery: list[Representation]
+    cover: Representation
+    digest: str = ""
+
+    def seal(self) -> None:
+        """Bind the entire audit envelope, including local cached blob membership."""
+        self.digest = manifest_digest(self.model_dump(exclude={"digest"}))
+
+    def verify(self) -> None:
+        """Refuse corrupt manifests before serving or consuming an approval."""
+        if self.digest != manifest_digest(self.model_dump(exclude={"digest"})):
+            raise ValueError("Processed snapshot integrity check failed; refresh evidence.")
+
+    def projection(self) -> dict:
+        """Expected draft-to-live transition and fresh capture times are not drift."""
+        return {
+            "contract": self.contract,
+            "profile": self.profile,
+            "remote_id": self.remote_id,
+            "api_origin": self.target.api_origin,
+            "shop_id": self.target.shop_id,
+            "shop_slug": self.target.shop_slug,
+            "gallery": [entry.projection() for entry in self.gallery],
+            "cover": self.cover.projection(),
+        }
+
+
+class FinalApproval(Record):
+    """Consumed seller grant for exactly one immutable snapshot."""
+
+    authorized_at: str = Field(default_factory=now)
+    snapshot_id: str
+    manifest_digest: str
+
+
 class Attempt(Record):
     """Exactly one durable remote-create opportunity per draft."""
 
@@ -144,12 +247,26 @@ class Attempt(Record):
     revision: int
     correlation: str
     fingerprint: str
-    state: str = "prepared"
+    state: Literal[
+        "prepared",
+        "creating",
+        "remote",
+        "review_ready",
+        "publishing",
+        "published",
+        "published_unverified",
+        "historical_unverified",
+    ] = "prepared"
     remote_id: str | None = None
     url: str | None = None
     error: str = ""
     staged_keys: list[str] = Field(default_factory=list)
-    image_ids: list[str] = Field(default_factory=list)
-    # Positionally paired with image_ids, under this attempt's approved fingerprint.
-    # Empty on legacy ID-only attempts: those IDs are not correspondence proof.
-    image_digests: list[str] = Field(default_factory=list)
+    contract: str = CONTRACT
+    approved_payload: dict | None = None
+    preparation: PreparationGrant | None = None
+    snapshot: ProcessedSnapshot | None = None
+    final_approval: FinalApproval | None = None
+    publish_intent_at: str | None = None
+    live_observed: bool = False
+    observed_at: str | None = None
+    observed_state: str | None = None

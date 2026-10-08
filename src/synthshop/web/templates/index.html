@@ -1,8 +1,8 @@
 {% extends 'base.html' %}
 {% block content %}
-<div class="eyebrow">01 / PHOTOS → 02 / DRAFT & EVIDENCE → 03 / REVIEW → 04 / PUBLISH</div>
-<h1>Your gear. Your words.<br><span class="muted">Nothing live until you approve.</span></h1>
-<div class="columns"><section class="card"><h2>Start with the real item</h2><p>Add front, rear, labels, accessories and any flaws. First photo becomes the cover; reorder before approval.</p>
+<div class="eyebrow">01 / PHOTOS → 02 / DRAFT → 03 / PREPARE → 04 / PROCESSED REVIEW → 05 / PUBLISH</div>
+<h1>Your gear. Your words.<br><span class="muted">Prepare first. Inspect before publishing.</span></h1>
+<div class="columns"><section class="card"><h2>Start with the real item</h2><p>Add front, rear, labels, accessories and any flaws. First photo is the intended cover; reorder before preparation, then inspect Reverb's returned cover separately.</p>
 <form action="/drafts" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="{{ csrf }}"><label>Item photos <input type="file" name="photos" multiple required accept="image/jpeg,image/png,image/webp,image/gif"></label><p class="hint">JPEG, PNG, WebP or still GIF, detected by content. Up to 25 images, 20 MiB each, 80 MiB per batch. EXIF orientation corrected; public derivatives strip metadata.</p><button>Create local draft</button></form></section>
 <section class="card"><h2>Backend readiness</h2>{% for name, enabled in ready.items() %}<p><span class="badge {{ 'ok' if enabled else '' }}">{{ 'Configured' if enabled else 'Not configured' }}</span> {{ name.replace('_',' ') }}</p>{% endfor %}
 <p><a class="button" href="/setup/openai">{{ 'OpenAI setup & help' if ready.vision else 'Set up OpenAI' }}</a></p>

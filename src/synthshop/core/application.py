@@ -10,6 +10,7 @@ from synthshop.core.models import OWNER_FACT_FIELDS, Comparable, Draft, Money, S
 from synthshop.core.photos import MAX_PHOTOS, PhotoLibrary
 from synthshop.core.pricing import from_reverb, recommendation
 from synthshop.core.product_store import DraftConflictError, DraftStore
+from synthshop.core.snapshots import SnapshotLibrary
 from synthshop.integrations.openai_vision import identify_from_photos
 from synthshop.integrations.reverb import ReverbClient
 
@@ -46,6 +47,7 @@ class Application:
         self.settings = settings
         self.store = DraftStore(settings.data_dir)
         self.photos = PhotoLibrary(self.store.root)
+        self.snapshots = SnapshotLibrary(self.store.root)
         self.import_errors = self.store.import_legacy(settings.products_dir)
 
     def current(self, draft_id: str, revision: int) -> Draft:
@@ -127,7 +129,7 @@ class Application:
             setattr(draft, name, value)
 
     def reorder(self, draft_id: str, revision: int, ids: list[str]) -> Draft:
-        """First image is cover. Require an exact permutation, not arbitrary photo references."""
+        """First image is intended cover. Require an exact permutation of current photos."""
         draft = self.current(draft_id, revision)
         if len(ids) != len(draft.photos) or set(ids) != {photo.id for photo in draft.photos}:
             raise ValueError("Photo order must contain each current photo exactly once.")

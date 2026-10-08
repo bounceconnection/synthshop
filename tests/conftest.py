@@ -19,9 +19,15 @@ def empty_credentials(monkeypatch):
         "OPENAI_PROJECT_ID",
         "VISION_MODEL",
         "REVERB_API_TOKEN",
+        "REVERB_BASE_URL",
+        "REVERB_PROCESSED_PHOTO_REVIEW_CONFIRMED",
+        "REVERB_EXACT_PHOTOS_CONFIRMED",
+        "EXPECTED_SHOP_ID",
+        "EXPECTED_SHOP_SLUG",
         "R2_ACCOUNT_ID",
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
+        "R2_BUCKET_NAME",
         "DATA_DIR",
         "PRODUCTS_DIR",
     ):
@@ -31,6 +37,7 @@ def empty_credentials(monkeypatch):
 @pytest.fixture(autouse=True)
 def no_external_network(monkeypatch):
     """A provider-double mismatch must fail locally, never contact a real account."""
+
     def reject_connection(*_args, **_kwargs):
         raise AssertionError("Tests cannot open network connections")
 
