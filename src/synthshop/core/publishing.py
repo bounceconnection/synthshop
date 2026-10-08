@@ -206,7 +206,10 @@ class Publisher:
             raise ValueError("Production target must be bounceconnection (1333667).")
 
     def review(self, draft_id: str, revision: int, fields: dict | None = None) -> dict:
-        """Read-only preparation review; this challenge cannot authorize a publish PUT."""
+        """Read-only on Reverb; submitted entries are saved only after every check passes.
+
+        This preparation challenge cannot authorize a publish PUT.
+        """
         self.app.store.attempt(draft_id)  # Release only an unsent reservation under its lock.
         with self.app.store.publish_lock():
             draft = self.app.current(draft_id, revision)
