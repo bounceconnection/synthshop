@@ -21,7 +21,7 @@ from synthshop.core.models import (
     now,
 )
 from synthshop.core.product_store import DraftConflictError
-from synthshop.core.validation import DraftFieldErrors, FIELD_LABELS
+from synthshop.core.validation import FIELD_LABELS, DraftFieldError
 from synthshop.integrations.reverb import NOT_CREATED, ReverbAPIError, ReverbClient
 from synthshop.integrations.staging import PhotoStaging
 
@@ -48,7 +48,7 @@ STALE_RECOMMENDATION = {
 
 def with_reason(outcome: str, exc: Exception) -> str:
     """Append only this application's own sanitized refusal text, never library/provider bodies."""
-    own = (ValueError, ReverbAPIError, DraftConflictError, DraftFieldErrors)
+    own = (ValueError, ReverbAPIError, DraftConflictError, DraftFieldError)
     detail = str(exc) if type(exc) in own else ""
     return f"{outcome} {detail}".strip()
 
@@ -113,7 +113,7 @@ class Publisher:
         """Resolve identifiers and explicit rates before the preparation review screen."""
         errors = self.field_errors(draft, references)
         if errors:
-            raise DraftFieldErrors(errors, references)
+            raise DraftFieldError(errors, references)
         condition = next(
             (row for row in references["conditions"] if row["display_name"] == draft.condition),
             None,
@@ -224,7 +224,7 @@ class Publisher:
                 references = client.references()
                 errors = {**self.field_errors(draft, references), **errors}
                 if errors:
-                    raise DraftFieldErrors(errors, references)
+                    raise DraftFieldError(errors, references)
                 payload = self.payload(draft, references)
                 shop = client.verify_shop() if settings.reverb_api_token else None
             if fields is not None:

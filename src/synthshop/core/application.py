@@ -11,7 +11,7 @@ from synthshop.core.photos import MAX_PHOTOS, PhotoLibrary
 from synthshop.core.pricing import from_reverb, recommendation
 from synthshop.core.product_store import DraftConflictError, DraftStore
 from synthshop.core.snapshots import SnapshotLibrary
-from synthshop.core.validation import DraftFieldErrors
+from synthshop.core.validation import DraftFieldError
 from synthshop.integrations.openai_vision import identify_from_photos
 from synthshop.integrations.reverb import ReverbClient
 
@@ -87,7 +87,7 @@ class Application:
         """Owner corrections win, including explicit nonfunctioning/poor condition."""
         draft, errors = self.prepare_edit(self.current(draft_id, revision), fields)
         if errors:
-            raise DraftFieldErrors(errors)
+            raise DraftFieldError(errors)
         return self.save(draft, revision)
 
     def prepare_edit(self, draft: Draft, fields: dict) -> tuple[Draft, dict[str, str]]:

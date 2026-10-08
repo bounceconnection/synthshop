@@ -6,7 +6,6 @@ from unittest.mock import Mock
 
 import httpx
 import pytest
-
 from fastapi.testclient import TestClient
 
 from synthshop.web.app import create_app
@@ -28,22 +27,33 @@ def test_invalid_review_keeps_all_edits_and_reports_all_fields(
     client = TestClient(web, base_url=LOCAL)
     client.get(f"/unlock?key={web.state.unlock}")
     fields = {
-        "csrf": web.state.csrf, "revision": item.revision,
-        "make": "  Newly typed maker  ", "model": "", "description": "",
-        "title": "My title", "condition": "Not a condition", "category_id": "unknown",
-        "price": "not money", "price_reason": "", "international_rates": "CA=fifty",
-        "variant": "<custom>", "offers_enabled": "on",
+        "csrf": web.state.csrf,
+        "revision": item.revision,
+        "make": "  Newly typed maker  ",
+        "model": "",
+        "description": "",
+        "title": "My title",
+        "condition": "Not a condition",
+        "category_id": "unknown",
+        "price": "not money",
+        "price_reason": "",
+        "international_rates": "CA=fifty",
+        "variant": "<custom>",
+        "offers_enabled": "on",
     }
-    response = client.post(
-        f"/drafts/{item.id}/review", data=fields, headers={"Origin": LOCAL}
-    )
+    response = client.post(f"/drafts/{item.id}/review", data=fields, headers={"Origin": LOCAL})
     assert response.status_code == 400
     assert response.template.name == "draft.html"
     assert response.context["values"]["make"] == fields["make"]
     assert response.context["values"]["price"] == "not money"
     assert response.context["values"]["international_rates"] == "CA=fifty"
     assert set(response.context["errors"]) == {
-        "model", "description", "condition", "category_id", "price", "price_reason",
+        "model",
+        "description",
+        "condition",
+        "category_id",
+        "price",
+        "price_reason",
         "international_rates",
     }
     assert "make" not in response.context["errors"]
@@ -82,16 +92,28 @@ def test_correcting_invalid_review_saves_visible_maker_before_review(
 ):
     item = application.upload([image_bytes])
     fields = {
-        "make": "", "model": "", "title": "", "description": "",
-        "condition": "", "category_id": "", "price": "", "price_reason": "",
+        "make": "",
+        "model": "",
+        "title": "",
+        "description": "",
+        "condition": "",
+        "category_id": "",
+        "price": "",
+        "price_reason": "",
     }
     invalid = submit(editor, item, fields)
     assert set(invalid.context["errors"]) == set(fields)
     assert application.store.load(item.id) == item
     fields.update(
-        make="Visible maker", model="Visible model", title="Owner title",
-        description="Owner description", condition="Poor", category_id="utility-uuid",
-        price="100.00", price_reason="Owner override", international_rates="CA=20.00",
+        make="Visible maker",
+        model="Visible model",
+        title="Owner title",
+        description="Owner description",
+        condition="Poor",
+        category_id="utility-uuid",
+        price="100.00",
+        price_reason="Owner override",
+        international_rates="CA=20.00",
     )
     reviewed = submit(editor, item, fields)
     assert reviewed.status_code == 200
@@ -107,8 +129,12 @@ def test_correcting_invalid_review_saves_visible_maker_before_review(
     client, csrf, provider = editor
     rejected = client.post(
         f"/drafts/{item.id}/prepare",
-        data={"csrf": csrf, "revision": item.revision, "token": reviewed.context["token"],
-              "approval": "prepare-unpublished"},
+        data={
+            "csrf": csrf,
+            "revision": item.revision,
+            "token": reviewed.context["token"],
+            "approval": "prepare-unpublished",
+        },
         headers={"Origin": LOCAL},
     )
     assert rejected.status_code == 409
@@ -118,9 +144,16 @@ def test_correcting_invalid_review_saves_visible_maker_before_review(
 @pytest.mark.parametrize("action", ["save", "review"])
 @pytest.mark.parametrize("price", ["NaN", "Infinity", "-1", "1.001", "1000000000000"])
 def test_tampered_money_retained_without_saving(application, draft, editor, action, price):
-    response = submit(editor, draft, {
-        "make": "Unsaved correction", "price": price, "international_rates": "CA=not-money",
-    }, action)
+    response = submit(
+        editor,
+        draft,
+        {
+            "make": "Unsaved correction",
+            "price": price,
+            "international_rates": "CA=not-money",
+        },
+        action,
+    )
     assert response.status_code == 400
     assert response.template.name == "draft.html"
     assert set(response.context["errors"]) == {"price", "international_rates"}
@@ -133,9 +166,17 @@ def test_tampered_money_retained_without_saving(application, draft, editor, acti
 def test_partial_save_allowed_but_invalid_text_preserved(application, image_bytes, editor):
     item = application.upload([image_bytes])
     too_long = "x" * 12001
-    invalid = submit(editor, item, {
-        "make": "Visible maker", "model": too_long, "title": "x" * 256, "price_reason": too_long,
-    }, "save")
+    invalid = submit(
+        editor,
+        item,
+        {
+            "make": "Visible maker",
+            "model": too_long,
+            "title": "x" * 256,
+            "price_reason": too_long,
+        },
+        "save",
+    )
     assert set(invalid.context["errors"]) == {"model", "title", "price_reason"}
     assert invalid.context["values"]["model"] == too_long
     assert application.store.load(item.id) == item
@@ -199,10 +240,15 @@ def recommended(application, draft):
     """Two reviewed sold observations; price and reasoning follow their recommendation."""
     rows = [
         {
-            "provider": "eBay", "url": f"https://www.ebay.com/itm/{number}",
-            "source_id": str(number), "source_class": "sold_display",
-            "provenance": "Owner observed sold page", "title": "Example Instruments Meter Stereo",
-            "amount": amount, "shipping": "0", "shipping_region": "US_CON",
+            "provider": "eBay",
+            "url": f"https://www.ebay.com/itm/{number}",
+            "source_id": str(number),
+            "source_class": "sold_display",
+            "provenance": "Owner observed sold page",
+            "title": "Example Instruments Meter Stereo",
+            "amount": amount,
+            "shipping": "0",
+            "shipping_region": "US_CON",
         }
         for number, amount in ((1, "200.00"), (2, "220.00"))
     ]
@@ -265,8 +311,10 @@ def test_local_review_blocker_keeps_entries_as_form_error(application, draft, ed
 
 def test_prepare_reports_specific_field_errors(application, draft, editor, references):
     for name, value in {
-        "reverb_api_token": "test-only", "r2_account_id": "example",
-        "r2_access_key_id": "test-only", "r2_secret_access_key": "test-only",
+        "reverb_api_token": "test-only",
+        "r2_account_id": "example",
+        "r2_access_key_id": "test-only",
+        "r2_secret_access_key": "test-only",
         "reverb_processed_photo_review_confirmed": True,
     }.items():
         setattr(application.settings, name, value)

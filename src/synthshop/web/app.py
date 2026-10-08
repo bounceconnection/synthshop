@@ -17,7 +17,7 @@ from synthshop.core.photos import MAX_BYTES
 from synthshop.core.pricing import recommendation
 from synthshop.core.product_store import DraftConflictError
 from synthshop.core.publishing import Publisher
-from synthshop.core.validation import DraftFieldErrors, FIELD_LABELS
+from synthshop.core.validation import FIELD_LABELS, DraftFieldError
 from synthshop.integrations.reverb import ReverbClient
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -158,18 +158,23 @@ def draft_editor(request: Request, draft, *, fields=None, errors=None, **context
     values["price"] = str(draft.price) if draft.price is not None else ""
     values["international_rates"] = "".join(
         f"{rate.region_code}={rate.amount}\n"
-        for rate in draft.shipping if rate.region_code != "US_CON"
+        for rate in draft.shipping
+        if rate.region_code != "US_CON"
     )
     if fields is not None:
         values.update({name: str(fields[name]) for name in FIELD_LABELS if name in fields})
         values["offers_enabled"] = fields.get("offers_enabled") in (True, "on", "true")
-    ordered_errors = {
-        name: errors[name] for name in FIELD_LABELS if errors and name in errors
-    }
+    ordered_errors = {name: errors[name] for name in FIELD_LABELS if errors and name in errors}
     response = render(
-        request, "draft.html", draft=draft, values=values, errors=ordered_errors,
-        labels=FIELD_LABELS, first_error=next(iter(ordered_errors), None),
-        pricing=recommendation(draft), attempt=service.store.attempt(draft.id),
+        request,
+        "draft.html",
+        draft=draft,
+        values=values,
+        errors=ordered_errors,
+        labels=FIELD_LABELS,
+        first_error=next(iter(ordered_errors), None),
+        pricing=recommendation(draft),
+        attempt=service.store.attempt(draft.id),
         **{"references": None, "blocker": None, **context},
     )
     response.status_code = 400 if errors or context.get("blocker") else 200
@@ -178,8 +183,9 @@ def draft_editor(request: Request, draft, *, fields=None, errors=None, **context
 
 async def action_error(request: Request, exc: Exception):
     """Keep provider bodies, file paths and validation input out of rendered errors."""
-    if isinstance(exc, DraftFieldErrors) and request.path_params.get("action") in (
-        "save", "review"
+    if isinstance(exc, DraftFieldError) and request.path_params.get("action") in (
+        "save",
+        "review",
     ):
         form = await request.form()
         draft = request.app.state.service.store.load(request.path_params["draft_id"])
@@ -205,8 +211,7 @@ async def action_error(request: Request, exc: Exception):
         status = 409 if isinstance(exc, DraftConflictError) else 400
         message = (
             str(exc)
-            if type(exc)
-            in (ValueError, DraftConflictError, MissingOpenAIKeyError, DraftFieldErrors)
+            if type(exc) in (ValueError, DraftConflictError, MissingOpenAIKeyError, DraftFieldError)
             else "Invalid input; check fields."
         )
     response = render(
